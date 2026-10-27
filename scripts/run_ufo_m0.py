@@ -2,13 +2,11 @@
 
 import argparse
 import json
+import os
 import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation
-
-import robojudo.pipeline
-from robojudo.config.config_manager import ConfigManager
 
 
 def main():
@@ -17,6 +15,9 @@ def main():
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=500)
     parser.add_argument("--render", action="store_true", help="Open a MuJoCo viewer")
+    parser.add_argument("--show-reference", action="store_true", help="Show a translucent reference in the viewer")
+    parser.add_argument("--record-video", default=None, metavar="PATH", help="Record a headless MP4")
+    parser.add_argument("--video-content", choices=("actual", "comparison"), default="actual")
     parser.add_argument(
         "--stop-on-fall",
         action=argparse.BooleanOptionalAction,
@@ -24,6 +25,15 @@ def main():
         help="Stop when root height falls below 0.35 m (default: enabled)",
     )
     args = parser.parse_args()
+    if args.record_video and (args.render or args.show_reference):
+        parser.error("--record-video is headless; use --video-content comparison for the reference")
+    if args.show_reference and not args.render:
+        parser.error("--show-reference requires --render")
+    if args.record_video:
+        os.environ["MUJOCO_GL"] = "egl"
+
+    import robojudo.pipeline
+    from robojudo.config.config_manager import ConfigManager
 
     cfg = ConfigManager("g1_ufo_m0").get_cfg()
     if args.motion_path is not None:
@@ -31,6 +41,9 @@ def main():
     cfg.policy.start_frame = args.start_frame
     cfg.policy.max_frames = args.max_frames
     cfg.env.render = args.render
+    cfg.env.show_reference = args.show_reference
+    cfg.env.video_path = args.record_video
+    cfg.env.video_content = args.video_content
     pipeline_class = getattr(robojudo.pipeline, cfg.pipeline_type)
     pipeline = pipeline_class(cfg=cfg)
     motion = pipeline.policy.policy.motion
@@ -61,6 +74,8 @@ def main():
                     break
             if args.render:
                 time.sleep(max(0.0, pipeline.dt - (time.monotonic() - tick)))
+    except KeyboardInterrupt:
+        pass
     finally:
         pipeline.env.shutdown()
     print(json.dumps({

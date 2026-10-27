@@ -282,6 +282,7 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
             pd_target[self.override_dof_indices] = self.policy_manager.override_dof_pos[self.override_dof_indices]
 
         if not dry_run:
+            self.update_reference_visualization(extras)
             self.env.step(pd_target, extras.get("hand_pose", None))
             # logger.debug(pd_target)
 

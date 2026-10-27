@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 import mujoco
@@ -6,6 +7,9 @@ import numpy as np
 
 from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import MujocoEnvCfg
+from robojudo.environment.utils.mujoco_render import (
+    MujocoVideoRecorder, ReferenceGhost, load_model,
+)
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.utils.util_func import quat_rotate_inverse_np, quatToEuler
 
@@ -24,12 +28,23 @@ class MujocoEnv(Environment):
         self.sim_decimation = cfg_env.sim_decimation
         self.control_dt = self.sim_dt * self.sim_decimation
 
-        self.model = mujoco.MjModel.from_xml_path(cfg_env.xml)  # pyright: ignore[reportAttributeAccessIssue]
+        if cfg_env.render and cfg_env.video_path:
+            raise ValueError("Window rendering and headless recording cannot run together")
+        if cfg_env.video_path and os.environ.get("MUJOCO_GL") != "egl":
+            raise RuntimeError("Set MUJOCO_GL=egl before importing MuJoCo for headless video")
+
+        self.model = load_model(cfg_env.xml, cfg_env.scene_style)
         self.model.opt.timestep = self.sim_dt
         self.data = mujoco.MjData(self.model)  # pyright: ignore[reportAttributeAccessIssue]
         # mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
 
+        needs_reference = (cfg_env.render and cfg_env.show_reference) or (
+            cfg_env.video_path is not None and cfg_env.video_content == "comparison"
+        )
+        self.reference_ghost = (
+            ReferenceGhost(self.model, cfg_env.reference_root_body) if needs_reference else None
+        )
         self.viewer = None
         if cfg_env.render:
             import mujoco_viewer
@@ -45,7 +60,18 @@ class MujocoEnv(Environment):
             self.viewer.cam.distance = 3.0
             self.viewer.cam.elevation = -10.0
             self.viewer.cam.azimuth = 180.0
+            if cfg_env.show_reference:
+                self.reference_ghost.option = self.viewer.vopt
+                self.viewer.scene_hook = self.reference_ghost.append
         # self.viewer._paused = True
+
+        self.video_recorder = None
+        if cfg_env.video_path:
+            self.video_recorder = MujocoVideoRecorder(
+                self.model, cfg_env.video_path, 1.0 / self.control_dt,
+                cfg_env.video_width, cfg_env.video_height,
+                ghost=self.reference_ghost if cfg_env.video_content == "comparison" else None,
+            )
 
         if cfg_env.visualize_extras and self.viewer is not None:
             self.visualizer = MujocoVisualizer(self.viewer)
@@ -157,10 +183,8 @@ class MujocoEnv(Environment):
         if hand_pose is not None:
             logger.info("Hand pose-->", hand_pose)
 
-        if self.viewer is not None:
-            self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
-            if self.viewer.is_alive:
-                self.viewer.render()
+        if self.reference_ghost is not None and not self.reference_ghost.has_pose:
+            raise ValueError("Reference visualization requires reference_qpos on every frame")
 
         for _ in range(self.sim_decimation):
             torque = (pd_target - self.dof_pos) * self.stiffness - self.dof_vel * self.damping
@@ -172,9 +196,23 @@ class MujocoEnv(Environment):
             self.update(simple=True)
         self.update(simple=False)
 
+        if self.viewer is not None and self.viewer.is_alive:
+            self.viewer.cam.lookat = self.data.qpos[:3]
+            self.viewer.render()
+        if self.video_recorder is not None:
+            self.video_recorder.write_frame(self.data)
+
+    def set_reference_qpos(self, qpos):
+        if self.reference_ghost is not None:
+            self.reference_ghost.set_pose(qpos)
+
     def shutdown(self):
-        if self.viewer is not None:
-            self.viewer.close()
+        try:
+            if self.viewer is not None and self.viewer.is_alive:
+                self.viewer.close()
+        finally:
+            if self.video_recorder is not None:
+                self.video_recorder.close()
 
 
 if __name__ == "__main__":

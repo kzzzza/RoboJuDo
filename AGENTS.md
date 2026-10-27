@@ -45,3 +45,4 @@
 - 原版 M0 使用同包的 B 与 Actor 两个 ONNX；注册配置 `g1_ufo_m0`，有限时长验证入口 `scripts/run_ufo_m0.py`，用法和数据约定见 `docs/ufo_m0.md`。
 - `~/data/lafan/lafan_g1_npz` 的 G1 NPZ 关节及刚体数组顺序均与 UFO XML 不同，四元数为 `wxyz`；转换逻辑在 `robojudo/utils/ufo_m0_motion.py`。更换动作来源时先确认这些约定。
 - `assets/robots/g1/g1_ufo_m0.xml` 在 UFO 机器人 XML 上补充地面、电机转子惯量及干摩擦；直接复制原 XML 会使仿真迅速发散。
+- MuJoCo 参考虚影和 EGL 无头视频是 `MujocoEnv` 的通用功能；策略在 `extras["reference_qpos"]` 传入下一控制帧完整的模型 `qpos`，用法见 `docs/mujoco_rendering.md`。UFO 默认使用浅色背景；ONNX 模型文件仅保留本地，不纳入 Git。

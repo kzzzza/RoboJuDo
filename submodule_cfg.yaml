@@ -12,6 +12,8 @@ mujoco_viewer:
     - ../patches/mujoco_viewer.patch
     # MuJoCo 3 removed the scene argument from mjv_moveCamera
     - ../patches/mujoco_viewer_mujoco3.patch
+    # Add a callback for shared reference geometry after scene update
+    - ../patches/mujoco_viewer_scene_hook.patch
 
 
 # Python binding for Unitree SDK2, https://github.com/HansZ8/unitree_cpp

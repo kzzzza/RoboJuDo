@@ -129,6 +129,7 @@ profile_output*
 *.wbproj
 assets/motions
 /assets/models/g1/ufo_m0/*.onnx
+/recordings/
 .gr1t2.jpg
 logs
 MUJOCO_LOG.TXT

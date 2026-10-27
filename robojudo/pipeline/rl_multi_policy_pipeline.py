@@ -172,6 +172,7 @@ class RlMultiPolicyPipeline(RlPipeline):
         pd_target = self.policy.get_pd_target(obs)
 
         if not dry_run:
+            self.update_reference_visualization(extras)
             self.env.step(pd_target, extras.get("hand_pose", None))
             # logger.debug(pd_target)
 

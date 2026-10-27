@@ -36,6 +36,13 @@ class MujocoEnvCfg(EnvCfg):
 
     visualize_extras: bool = True  # TODO: remove
     render: bool = True
+    show_reference: bool = False
+    reference_root_body: str | None = None
+    scene_style: Literal["model", "light"] = "model"
+    video_path: str | None = None
+    video_content: Literal["actual", "comparison"] = "actual"
+    video_width: int = 1280
+    video_height: int = 720
 
     random_heading: bool = False
     """Randomize the robot's yaw heading on each spawn/reborn (useful for testing heading alignment)."""

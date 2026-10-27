@@ -98,8 +98,13 @@ class UfoM0Motion:
         self.body_ang_vel = np.concatenate([body_ang_vel, body_ang_vel[:, 15:16]], axis=1).astype(np.float32)
 
     def first_qpos(self) -> np.ndarray:
-        root_quat_wxyz = self.body_quat[0, 0, [3, 0, 1, 2]]
-        return np.concatenate([self.body_pos[0, 0], root_quat_wxyz, self.dof_pos[0]]).astype(np.float64)
+        return self.qpos_at(0)
+
+    def qpos_at(self, frame: int) -> np.ndarray:
+        """Return a complete model-order MuJoCo pose for visualization."""
+        root_quat_wxyz = self.body_quat[frame, 0, [3, 0, 1, 2]]
+        return np.concatenate([self.body_pos[frame, 0], root_quat_wxyz,
+                               self.dof_pos[frame]]).astype(np.float64)
 
     def first_qvel(self) -> np.ndarray:
         local_ang = Rotation.from_quat(self.body_quat[0, 0]).inv().apply(self.body_ang_vel[0, 0])

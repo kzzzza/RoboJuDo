@@ -41,3 +41,9 @@ class Pipeline(ABC):
 
     def safety_check(self):
         return
+
+    def update_reference_visualization(self, extras):
+        """Pass an optional model-order reference pose to a simulation renderer."""
+        setter = getattr(self.env, "set_reference_qpos", None)
+        if setter is not None:
+            setter(extras.get("reference_qpos"))

@@ -1,0 +1,29 @@
+--- a/mujoco_viewer/mujoco_viewer.py
++++ b/mujoco_viewer/mujoco_viewer.py
+@@ -74,6 +74,7 @@
+         self.cam = mujoco.MjvCamera()
+         self.scn = mujoco.MjvScene(self.model, maxgeom=100000) # 10000
+         self.pert = mujoco.MjvPerturb()
++        self.scene_hook = None
+-
++
+         self.ctx = mujoco.MjrContext(
+             self.model, mujoco.mjtFontScale.mjFONTSCALE_150.value)
+@@ -415,6 +416,8 @@
+             self.cam,
+             mujoco.mjtCatBit.mjCAT_ALL.value,
+             self.scn)
++        if self.scene_hook is not None:
++            self.scene_hook(self.scn)
+         # render
+         mujoco.mjr_render(self.viewport, self.scn, self.ctx)
+         shape = glfw.get_framebuffer_size(self.window)
+@@ -461,6 +464,8 @@
+                     self.cam,
+                     mujoco.mjtCatBit.mjCAT_ALL.value,
+                     self.scn)
++                if self.scene_hook is not None:
++                    self.scene_hook(self.scn)
+                 # marker items
+                 for _ , marker in self._markers_dict.items():
+                     self._add_marker_to_scene(marker)

@@ -1,5 +1,7 @@
 """MuJoCo environment matching UFO M0's G1 model and 50 Hz control."""
 
+from typing import Literal
+
 from robojudo.config import ASSETS_DIR
 from robojudo.config.g1.policy.g1_ufo_m0_policy_cfg import G1UfoM0DoF
 from robojudo.environment.env_cfgs import MujocoEnvCfg
@@ -19,3 +21,4 @@ class G1UfoM0MujocoEnvCfg(G1EnvCfg, MujocoEnvCfg):
     sim_decimation: int = 4
     render: bool = False
     visualize_extras: bool = False
+    scene_style: Literal["model", "light"] = "light"

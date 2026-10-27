@@ -103,7 +103,10 @@ class UfoM0Policy(Policy):
             self.history[key].append(values[key].copy())
         if obs.shape != (721,) or not np.all(np.isfinite(obs)):
             raise ValueError("Invalid UFO M0 actor observation")
-        return obs.astype(np.float32), {"reference_frame": self.frame + 1}
+        return obs.astype(np.float32), {
+            "reference_frame": self.frame + 1,
+            "reference_qpos": self.motion.qpos_at(self.frame + 1),
+        }
 
     def get_action(self, obs: np.ndarray) -> np.ndarray:
         raw = self.actor_session.run(["action"], {"actor_obs": obs[None].astype(np.float32)})[0]

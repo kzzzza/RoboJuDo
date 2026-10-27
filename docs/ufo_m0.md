@@ -20,7 +20,8 @@ uv pip install --python .venv/bin/python -e . --no-deps
 git submodule update --init third_party/mujoco_viewer
 (cd third_party/mujoco_viewer && \
   git apply ../patches/mujoco_viewer.patch && \
-  git apply ../patches/mujoco_viewer_mujoco3.patch)
+  git apply ../patches/mujoco_viewer_mujoco3.patch && \
+  git apply ../patches/mujoco_viewer_scene_hook.patch)
 uv pip install --python .venv/bin/python -e third_party/mujoco_viewer
 # Copy FBcprAuxModel.onnx and backward_encoder.onnx into assets/models/g1/ufo_m0/
 .venv/bin/python scripts/run_ufo_m0.py \
@@ -29,6 +30,26 @@ uv pip install --python .venv/bin/python -e third_party/mujoco_viewer
 ```
 
 The viewer opens in a desktop session and follows the robot during playback.
+Add `--show-reference` to display the motion as a translucent blue robot at
+the same world position as the simulated robot. The reference follows the
+policy's next-frame target, so the two poses are compared after each control
+step. The scene uses the reusable light-background preset.
+
+To save a video without a desktop display, omit `--render` and run:
+
+```bash
+.venv/bin/python scripts/run_ufo_m0.py \
+  --motion-path ~/data/lafan/lafan_g1_npz/walk1_subject1.npz \
+  --max-frames 1500 --record-video recordings/ufo_walk.mp4 \
+  --video-content comparison
+```
+
+Use `--video-content actual` to record only the simulated robot. Recording
+requires the `ffmpeg` executable and an EGL-capable MuJoCo installation. The
+CLI sets `MUJOCO_GL=egl` before importing MuJoCo. An existing output file is
+never overwritten. See [MuJoCo rendering](mujoco_rendering.md) for the
+interface used by other policies.
+
 The example shows 30 seconds at 50 Hz. The runner defaults to the first 500
 frames of that walk when `--max-frames` is omitted. `--start-frame`
 selects another segment; `--motion-path` selects another retargeted G1 NPZ.

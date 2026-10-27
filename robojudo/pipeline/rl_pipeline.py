@@ -237,6 +237,7 @@ class RlPipeline(Pipeline):
             self._blend_out_step += 1
 
         if not dry_run:
+            self.update_reference_visualization(extras)
             self.env.step(pd_target, extras.get("hand_pose", None))
 
         self.post_step_callback(env_data, ctrl_data, extras, pd_target)
@@ -274,6 +275,7 @@ class RlPipeline(Pipeline):
 
             action = (1 - alpha) * self._init_dof_pos + alpha * policy_pd
 
+            self.update_reference_visualization(extras)
             self.env.step(action)
 
             time_diff = last_step_time + self.dt - time.time()
@@ -363,6 +365,7 @@ class RlPipeline(Pipeline):
             # Blend: default DOF → policy output
             action = (1 - alpha) * desired_motor_angle + alpha * policy_pd
 
+            self.update_reference_visualization(extras)
             self.env.step(action)
 
             # Do NOT call post_step_callback — frame stays at 0.
