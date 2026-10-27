@@ -2,7 +2,6 @@ import logging
 import time
 
 import mujoco
-import mujoco_viewer
 import numpy as np
 
 from robojudo.environment import Environment, env_registry
@@ -31,20 +30,24 @@ class MujocoEnv(Environment):
         # mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
 
-        self.viewer = mujoco_viewer.MujocoViewer(
-            self.model,
-            self.data,
-            width=1200,
-            height=900,
-            hide_menus=True,
-            diable_key_callbacks=True,
-        )
-        self.viewer.cam.distance = 3.0
-        self.viewer.cam.elevation = -10.0
-        self.viewer.cam.azimuth = 180.0
+        self.viewer = None
+        if cfg_env.render:
+            import mujoco_viewer
+
+            self.viewer = mujoco_viewer.MujocoViewer(
+                self.model,
+                self.data,
+                width=1200,
+                height=900,
+                hide_menus=True,
+                diable_key_callbacks=True,
+            )
+            self.viewer.cam.distance = 3.0
+            self.viewer.cam.elevation = -10.0
+            self.viewer.cam.azimuth = 180.0
         # self.viewer._paused = True
 
-        if cfg_env.visualize_extras:
+        if cfg_env.visualize_extras and self.viewer is not None:
             self.visualizer = MujocoVisualizer(self.viewer)
         else:
             self.visualizer = None
@@ -69,10 +72,22 @@ class MujocoEnv(Environment):
         self.data.qpos[5] = c * q[2] + s * q[1]
         self.data.qpos[6] = c * q[3] + s * q[0]
 
-    def reborn(self, init_qpos=None):
+    def reborn(self, init_qpos=None, init_qvel=None):
         if init_qpos is not None:
-            self.data.qpos[0:7] = init_qpos
-            self.data.qvel[:] = 0.0
+            qpos = np.asarray(init_qpos)
+            if qpos.shape == (7,):
+                self.data.qpos[0:7] = qpos
+            elif qpos.shape == (self.model.nq,):
+                self.data.qpos[:] = qpos
+            else:
+                raise ValueError(f"init_qpos must have 7 or {self.model.nq} elements")
+            if init_qvel is None:
+                self.data.qvel[:] = 0.0
+            else:
+                qvel = np.asarray(init_qvel)
+                if qvel.shape != (self.model.nv,):
+                    raise ValueError(f"init_qvel must have {self.model.nv} elements")
+                self.data.qvel[:] = qvel
             self.data.ctrl[:] = 0.0
         else:
             mujoco.mj_resetDataKeyframe(self.model, self.data, 0)  # pyright: ignore[reportAttributeAccessIssue]
@@ -142,9 +157,10 @@ class MujocoEnv(Environment):
         if hand_pose is not None:
             logger.info("Hand pose-->", hand_pose)
 
-        self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
-        if self.viewer.is_alive:
-            self.viewer.render()
+        if self.viewer is not None:
+            self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
+            if self.viewer.is_alive:
+                self.viewer.render()
 
         for _ in range(self.sim_decimation):
             torque = (pd_target - self.dof_pos) * self.stiffness - self.dof_vel * self.damping
@@ -157,7 +173,8 @@ class MujocoEnv(Environment):
         self.update(simple=False)
 
     def shutdown(self):
-        self.viewer.close()
+        if self.viewer is not None:
+            self.viewer.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,36 @@
+diff --git a/mujoco_viewer/callbacks.py b/mujoco_viewer/callbacks.py
+index 39ce6a7..f8401b7 100644
+--- a/mujoco_viewer/callbacks.py
++++ b/mujoco_viewer/callbacks.py
+@@ -180,13 +180,12 @@ class Callbacks:
+                     self.scn,
+                     self.pert)
+             else:
+-                mujoco.mjv_moveCamera(
+-                    self.model,
+-                    action,
+-                    dx / height,
+-                    dy / height,
+-                    self.scn,
+-                    self.cam)
++                if MUJOCO_VERSION >= (3, 0, 0):
++                    mujoco.mjv_moveCamera(
++                        self.model, action, dx / height, dy / height, self.cam)
++                else:
++                    mujoco.mjv_moveCamera(
++                        self.model, action, dx / height, dy / height, self.scn, self.cam)
+ 
+         self._last_mouse_x = int(self._scale * xpos)
+         self._last_mouse_y = int(self._scale * ypos)
+@@ -318,5 +317,9 @@ class Callbacks:
+ 
+     def _scroll_callback(self, window, x_offset, y_offset):
+         with self._gui_lock:
+-            mujoco.mjv_moveCamera(
+-                self.model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0, -0.05 * y_offset, self.scn, self.cam)
++            if MUJOCO_VERSION >= (3, 0, 0):
++                mujoco.mjv_moveCamera(
++                    self.model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0, -0.05 * y_offset, self.cam)
++            else:
++                mujoco.mjv_moveCamera(
++                    self.model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0, -0.05 * y_offset, self.scn, self.cam)

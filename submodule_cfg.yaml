@@ -10,6 +10,8 @@ mujoco_viewer:
   patches: 
     # Patch for visualization draw
     - ../patches/mujoco_viewer.patch
+    # MuJoCo 3 removed the scene argument from mjv_moveCamera
+    - ../patches/mujoco_viewer_mujoco3.patch
 
 
 # Python binding for Unitree SDK2, https://github.com/HansZ8/unitree_cpp
