@@ -70,24 +70,30 @@ class RlPipeline(Pipeline):
 
         env_class: type[Environment] = getattr(robojudo.environment, self.cfg.env.env_type)
         self.env: Environment = env_class(cfg_env=self.cfg.env, device=self.device)
+        try:
+            self.ctrl_manager = CtrlManager(cfg_ctrls=self.cfg.ctrl, env=self.env, device=self.device)
 
-        self.ctrl_manager = CtrlManager(cfg_ctrls=self.cfg.ctrl, env=self.env, device=self.device)
+            self.policy = PolicyWrapper(
+                cfg_policy=self.cfg.policy,
+                env_dof_cfg=self.env.dof_cfg,
+                device=self.device,
+            )
 
-        self.policy = PolicyWrapper(
-            cfg_policy=self.cfg.policy,
-            env_dof_cfg=self.env.dof_cfg,
-            device=self.device,
-        )
+            self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
+            self.visualizer = self.env.visualizer
 
-        self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
-        self.visualizer = self.env.visualizer
+            self.freq = self.cfg.policy.freq
+            self.dt = 1.0 / self.freq
 
-        self.freq = self.cfg.policy.freq
-        self.dt = 1.0 / self.freq
-
-        self.reset()
-        self.self_check()
-        self.policy.reset()  # reset frame counter after dry-run steps
+            self.reset()
+            self.self_check()
+            self.policy.reset()  # reset frame counter after dry-run steps
+        except BaseException:
+            try:
+                self.env.shutdown()
+            except Exception:
+                logger.exception("Environment cleanup failed during pipeline initialization")
+            raise
 
     def self_check(self):
         self.env.self_check()
@@ -206,6 +212,10 @@ class RlPipeline(Pipeline):
                 timestep=self.timestep,
             )
 
+    def pre_policy_step(self, env_data, ctrl_data, dry_run=False) -> bool:
+        """Return True when a specialized pipeline handled this control cycle."""
+        return False
+
     def step(self, dry_run=False):
         self.env.update()
         env_data = self.env.get_data()
@@ -215,6 +225,9 @@ class RlPipeline(Pipeline):
         commands = ctrl_data.get("COMMANDS", [])
         if len(commands) > 0:
             logger.info(f"{'=' * 10} COMMANDS {'=' * 10}\n{commands}")
+
+        if self.pre_policy_step(env_data, ctrl_data, dry_run=dry_run):
+            return
 
         obs, extras = self.policy.get_observation(env_data, ctrl_data)
         pd_target = self.policy.get_pd_target(obs)

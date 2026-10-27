@@ -6,6 +6,7 @@ from unitree_cpp import RobotState, SportState, UnitreeController  # type: ignor
 
 from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import UnitreeEnvCfg
+from robojudo.environment.utils.real_target_guard import RealTargetGuard
 from robojudo.tools.retarget import HandRetarget
 from robojudo.utils.rotation import TransformAlignment
 from robojudo.utils.util_func import quat_rotate_inverse_np
@@ -21,6 +22,16 @@ class UnitreeCppEnv(Environment):
         self.enabled: bool = cfg_env.act
         super().__init__(cfg_env=cfg_env, device=device)
         self.RemoteControllerHandler = None
+        self.target_guard = (
+            RealTargetGuard(
+                self.position_limits,
+                cfg_env.target_velocity_limits,
+                cfg_env.unitree.control_dt,
+                cfg_env.target_slew_safety_factor,
+            )
+            if cfg_env.target_velocity_limits is not None
+            else None
+        )
 
         cfg_unitree: UnitreeEnvCfg.UnitreeCfg = cfg_env.unitree
 
@@ -60,17 +71,36 @@ class UnitreeCppEnv(Environment):
             self.torso_align = TransformAlignment()
 
         # time.sleep(1)  # wait for unitree init
-        self.self_check()
+        try:
+            self.self_check()
+        except BaseException:
+            try:
+                self.unitree.shutdown()
+            except Exception:
+                logger.exception("UnitreeCppEnv cleanup failed after initialization error")
+            raise
 
     def self_check(self):
         for _ in range(30):
             time.sleep(0.1)
             if self.unitree.self_check():
                 logger.info("UnitreeCppEnv self check passed!")
-                break
-        if not self.unitree.self_check():
-            logger.critical("UnitreeCppEnv self check failed!")
-            exit()
+                return
+        logger.critical("UnitreeCppEnv self check failed!")
+        raise RuntimeError("UnitreeCppEnv self check failed")
+
+    def update_dof_cfg(self, override_cfg=None):
+        super().update_dof_cfg(override_cfg=override_cfg)
+        if getattr(self, "target_guard", None) is not None:
+            # PolicyWrapper may override limits after environment construction.
+            last_command = self.target_guard.last_command
+            self.target_guard = RealTargetGuard(
+                self.position_limits,
+                self.cfg_env.target_velocity_limits,
+                self.cfg_env.unitree.control_dt,
+                self.cfg_env.target_slew_safety_factor,
+            )
+            self.target_guard.last_command = last_command
 
     def reset(self):
         if self.born_place_align:  # TODO: merge
@@ -152,17 +182,13 @@ class UnitreeCppEnv(Environment):
             self.RemoteControllerHandler(self.robot_state.wireless_remote)
 
     def step(self, pd_target, hand_pose=None):
-        assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
-
-        # limits = self.position_limits
-        # pd_target_clipped = np.clip(pd_target, limits[:, 0], limits[:, 1])
-
-        # delta = pd_target - pd_target_clipped
-        # if np.any(delta != 0):
-        #     logger.warning(f"JOINT out of LIMIT-> {delta}")
-
-        # positions = pd_target_clipped
-        positions = pd_target
+        if self.target_guard is not None:
+            if self.robot_state is None:
+                raise ValueError("Cannot send a guarded target before receiving robot state")
+            positions = self.target_guard.filter(pd_target, self.dof_pos)
+        else:
+            assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
+            positions = pd_target
         if self.enabled:
             self.unitree.step(positions.tolist())
 
@@ -176,6 +202,24 @@ class UnitreeCppEnv(Environment):
 
             if self.enabled:
                 self.unitree.step_hands(hand_pose[0], hand_pose[1])
+
+    def send_hold(self) -> bool:
+        """Send the latest measured joint positions when feedback is valid."""
+        if not self.enabled or self.robot_state is None:
+            return False
+        try:
+            if self.target_guard is not None:
+                positions = self.target_guard.hold(self.dof_pos)
+            else:
+                positions = np.asarray(self.dof_pos, dtype=np.float64)
+                if positions.shape != (self.num_dofs,) or not np.all(np.isfinite(positions)):
+                    return False
+                positions = np.clip(positions, self.position_limits[:, 0], self.position_limits[:, 1])
+            self.unitree.step(positions.tolist())
+            return True
+        except Exception as exc:
+            logger.warning("Could not send measured-position hold: %s", exc)
+            return False
 
     def shutdown(self):
         # self.set_damping_mode()

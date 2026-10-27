@@ -57,13 +57,13 @@ def main():
 
     pipeline = pipeline_class(cfg=cfg)
 
-    if not cfg.env.is_sim:
-        pipeline.prepare()
-    elif getattr(pipeline, "_has_default_pose_mode", False):
-        pipeline._set_default_pose_mode(True)
-        logger.warning("Sim mode — holding default pose, press R to start motion")
-
     try:
+        if not cfg.env.is_sim:
+            pipeline.prepare()
+        elif getattr(pipeline, "_has_default_pose_mode", False):
+            pipeline._set_default_pose_mode(True)
+            logger.warning("Sim mode — holding default pose, press R to start motion")
+
         while True:
             time_start = time.time()
             pipeline.step()
@@ -79,12 +79,16 @@ def main():
                     logger.error(f"Warning: frame drop -> {time_diff}")
                     if time_diff < -0.2:
                         logger.critical("Exiting due to excessive frame drop")
-                        time.sleep(10)
                         break
     except KeyboardInterrupt:
         logger.info("Interrupted; finalizing simulation outputs")
     finally:
-        pipeline.env.shutdown()
+        try:
+            safe_stop = getattr(pipeline, "safe_stop", None)
+            if safe_stop is not None:
+                safe_stop()
+        finally:
+            pipeline.env.shutdown()
 
 
 if __name__ == "__main__":

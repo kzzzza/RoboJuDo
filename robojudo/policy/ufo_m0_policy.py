@@ -67,6 +67,8 @@ class UfoM0Policy(Policy):
 
     def reset(self):
         self.frame = 0
+        self.tracking_enabled = True
+        self.motion_done = False
         self.last_action = np.zeros(29, dtype=np.float32)
         self.history = {
             key: deque((np.zeros(size, dtype=np.float32) for _ in range(4)), maxlen=4)
@@ -77,8 +79,18 @@ class UfoM0Policy(Policy):
     def post_step_callback(self, commands=None):
         if any(cmd in ("[MOTION_RESET]", "[MOTION_FADE_IN]") for cmd in commands or []):
             self.reset()
-        else:
-            self.frame = min(self.frame + 1, self.motion.num_frames - 2)
+        elif self.tracking_enabled:
+            if self.frame >= self.motion.num_frames - 2:
+                self.motion_done = True
+            else:
+                self.frame += 1
+
+    def set_tracking_enabled(self, enabled: bool):
+        self.tracking_enabled = enabled
+
+    def reset_reference(self):
+        self.frame = 0
+        self.motion_done = False
 
     def get_init_dof_pos(self) -> np.ndarray:
         return self.motion.dof_pos[0].copy()
@@ -97,10 +109,11 @@ class UfoM0Policy(Policy):
             "projected_gravity": gravity,
         }
         state = np.concatenate([dof_pos, dof_vel, gravity, base_ang_vel])
+        # M0 training queries the newest-first history before inserting this frame.
         history = np.concatenate([np.concatenate(list(self.history[key])) for key in HISTORY_KEYS])
         obs = np.concatenate([state, self.last_action, history, self.z[self.frame]])
         for key in HISTORY_KEYS:
-            self.history[key].append(values[key].copy())
+            self.history[key].appendleft(values[key].copy())
         if obs.shape != (721,) or not np.all(np.isfinite(obs)):
             raise ValueError("Invalid UFO M0 actor observation")
         return obs.astype(np.float32), {

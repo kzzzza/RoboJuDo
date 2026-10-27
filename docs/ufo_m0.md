@@ -72,7 +72,8 @@ continues to its frame limit.
   angular velocity. B consumes reference `state[64]` and
   `privileged_state[463]`, producing `z[256]` for the next reference frame.
 - The actor consumes `actor_obs[721]`: current state, previous normalized
-  action, four prior observation frames grouped by feature, and `z`. Its
+  action, four prior observation frames grouped by feature in newest-first
+  order, and `z`. History is read before the current frame is inserted. Its
   output is multiplied by 5 and clipped to `[-5, 5]`; the PD target is
   `default_pos + action * 0.25 * effort_limit / kp`.
 - Simulation runs at 200 Hz physics and 50 Hz policy control. The policy
@@ -83,3 +84,52 @@ continues to its frame limit.
 The finite runner is intended for repeatable motion checks. The registered
 `g1_ufo_m0` config also works with `scripts/run_pipeline.py` for a continuous
 headless run; after the selected reference ends, it keeps the last reference.
+
+## G1 Real deployment
+
+`g1_ufo_m0_real` uses RoboJuDo's existing `UnitreeCppEnv` driver, the same M0
+Actor/B pair and the selected LAFAN G1 motion. The real configuration runs at
+50 Hz, uses `eth0`, and enables position, velocity-slew and base-attitude
+checks. The checked-in `artifact_manifest.json` records SHA256 hashes of the
+local model pair and metadata; ONNX binaries remain ignored by Git. UFO's
+`deploy` branch uses different ONNX files, so its real-robot result does not
+validate these particular M0 binaries.
+
+Run the non-actuating preflight before launching control:
+
+```bash
+python scripts/check_ufo_m0_real.py
+UFO_REAL_ROBOT_OK=1 python scripts/run_pipeline.py -c g1_ufo_m0_real
+```
+
+The preflight checks model hashes, ONNX inference, the selected motion,
+`unitree_cpp` availability, and the configured network interface. It does not
+construct a robot control environment or publish commands. On a development
+machine without the robot interface, use `--offline` to check models and
+motion only. Install the existing RoboJuDo real-robot dependencies following
+[Unitree setup](unitree_setup.md); no UFO `g1_interface` installation is needed.
+The default motion path is
+`~/data/lafan/lafan_g1_npz/walk1_subject1.npz`; set the policy configuration
+to the copied G1 motion path if the robot uses a different location.
+
+After launch, the pipeline is disarmed and sends no joint target until the
+operator presses **A**. A ramps from measured joints to the default standing
+pose for 500 cycles (10 seconds). **R1** enables policy output with the first
+reference frame fixed. **B** starts reference playback. **X** stops playback
+and resets it to the first reference frame. At the end of the selected motion,
+the robot returns to the standing pose over five seconds.
+
+**R2** takes priority over all other buttons: it stops inference and sends a
+measured-position hold when feedback is valid and control has already started.
+If R2 is pressed before standing initialization completes, release it and
+press A again; no policy action can start before the standing phase completes.
+To rearm after an R2 stop from the ready state,
+release R2, R1 and B, then press **R1+B** together. An observation, inference,
+target or base-attitude fault cannot be rearmed in the same process; inspect
+the fault and restart. Keyboard interruption or a severe frame drop also
+attempts a fresh measured-position hold before driver shutdown.
+
+The software path can be checked with hardware-free tests and sim2sim. Real
+tracking quality and stop behavior still require a supported, supervised
+robot test; this document does not claim that the M0 Real adaptation has
+already passed one.

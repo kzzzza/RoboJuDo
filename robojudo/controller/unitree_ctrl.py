@@ -31,6 +31,15 @@ class UnitreeCtrl(JoystickCtrl):
         else:
             logger.warning("No Unitree env, controller not working.")
 
+    def get_data(self):
+        data = super().get_data()
+        remote = self.unitree_remote_controller
+        data["buttons"] = {
+            name: bool(remote.last_button_state[index])
+            for index, name in enumerate(remote.button_map)
+        }
+        return data
+
 
 if __name__ == "__main__":
     from robojudo.config.g1.env.g1_real_env_cfg import G1RealEnvCfg

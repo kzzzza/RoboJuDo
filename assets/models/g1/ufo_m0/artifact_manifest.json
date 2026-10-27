@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": {
+    "FBcprAuxModel.onnx": "2f9b19917f6d432b1ab62ec8eacd88704eda23b898ce7a8d7ef7968a3b4f9d74",
+    "backward_encoder.onnx": "4e79c623773cd9da38a3b8c91bd9799fe8dc5804ece51682f223b33bcbbaaa19",
+    "FBcprAuxModel.meta.json": "2becae91a07ef6ee6bd588e35166280523724a23fc515a40b0485281bb94a4e4"
+  }
+}

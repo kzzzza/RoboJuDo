@@ -1,5 +1,6 @@
 from typing import Literal
 
+import numpy as np
 from pydantic import model_validator
 
 from robojudo.config import Config
@@ -100,6 +101,9 @@ class UnitreeEnvCfg(RobotEnvCfg):
 
     joint2motor_idx: list[int] | None = None
     """Mapping from env dof to motor index, None for direct mapping"""
+    target_velocity_limits: list[float] | None = None
+    """Enable final real target guarding when set; values follow env joint order."""
+    target_slew_safety_factor: float = 0.5
     weak_motor: list[int] = []
 
     hand_retarget: None = None  # TODO
@@ -108,4 +112,11 @@ class UnitreeEnvCfg(RobotEnvCfg):
     def check_joint2motor_idx(self):
         if self.joint2motor_idx is not None and len(self.joint2motor_idx) != self.dof.num_dofs:
             raise ValueError("joint2motor_idx length must match dof.num_dofs")
+        if self.target_velocity_limits is not None:
+            if len(self.target_velocity_limits) != self.dof.num_dofs:
+                raise ValueError("target_velocity_limits length must match dof.num_dofs")
+            if any(not np.isfinite(value) or value <= 0 for value in self.target_velocity_limits):
+                raise ValueError("target_velocity_limits must be finite and positive")
+            if not np.isfinite(self.target_slew_safety_factor) or not 0 < self.target_slew_safety_factor <= 1:
+                raise ValueError("target_slew_safety_factor must be in (0, 1]")
         return self
