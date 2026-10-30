@@ -30,32 +30,35 @@ class UfoM0Policy(Policy):
         if meta["actor_obs_dim"] != 721 or meta["z_dim"] != 256:
             raise ValueError("Expected the original UFO G1 M0 actor with 721 inputs and 256 latent values")
 
-        self.motion = UfoM0Motion(
-            cfg_policy.motion_path,
-            default_pos=self.default_dof_pos,
-            start_frame=cfg_policy.start_frame,
-            max_frames=cfg_policy.max_frames,
-        )
         providers = ["CPUExecutionProvider"]
-        self.backward_session = ort.InferenceSession(str(model_dir / "backward_encoder.onnx"), providers=providers)
         self.actor_session = ort.InferenceSession(str(model_dir / "FBcprAuxModel.onnx"), providers=providers)
-        if {item.name: item.shape[-1] for item in self.backward_session.get_inputs()} != {
-            "state": 64, "privileged_state": 463,
-        }:
-            raise ValueError("Unexpected UFO M0 backward encoder inputs")
         if [(item.name, item.shape[-1]) for item in self.actor_session.get_inputs()] != [("actor_obs", 721)]:
             raise ValueError("Unexpected UFO M0 actor input")
 
-        # Reference B encoding is independent of live robot state. UFO tracks
-        # reference frame t+1 at control step t, so omit reference frame zero.
-        zs = []
-        for start in range(1, self.motion.num_frames, 512):
-            state, privileged = self.motion.backward_inputs(start, min(start + 512, self.motion.num_frames))
-            z = self.backward_session.run(["z"], {"state": state, "privileged_state": privileged})[0]
-            zs.append(np.asarray(z, dtype=np.float32))
-        self.z = np.concatenate(zs, axis=0)
-        if self.z.shape != (self.motion.num_frames - 1, 256) or not np.all(np.isfinite(self.z)):
-            raise ValueError("Invalid UFO M0 reference embedding")
+        self.motion = None
+        self.backward_session = None
+        self.z = None
+        if cfg_policy.latent_source == "motion":
+            self.motion = UfoM0Motion(
+                cfg_policy.motion_path,
+                default_pos=self.default_dof_pos,
+                start_frame=cfg_policy.start_frame,
+                max_frames=cfg_policy.max_frames,
+            )
+            self.backward_session = ort.InferenceSession(str(model_dir / "backward_encoder.onnx"), providers=providers)
+            if {item.name: item.shape[-1] for item in self.backward_session.get_inputs()} != {
+                "state": 64, "privileged_state": 463,
+            }:
+                raise ValueError("Unexpected UFO M0 backward encoder inputs")
+            # UFO tracks reference frame t+1 at control step t.
+            zs = []
+            for start in range(1, self.motion.num_frames, 512):
+                state, privileged = self.motion.backward_inputs(start, min(start + 512, self.motion.num_frames))
+                z = self.backward_session.run(["z"], {"state": state, "privileged_state": privileged})[0]
+                zs.append(np.asarray(z, dtype=np.float32))
+            self.z = np.concatenate(zs, axis=0)
+            if self.z.shape != (self.motion.num_frames - 1, 256) or not np.all(np.isfinite(self.z)):
+                raise ValueError("Invalid UFO M0 reference embedding")
 
         self.effort_limits = np.asarray(cfg_policy.effort_limits, dtype=np.float32)
         self.kp = np.asarray(self.cfg_action_dof.stiffness, dtype=np.float32)
@@ -63,7 +66,10 @@ class UfoM0Policy(Policy):
             raise ValueError("UFO M0 requires positive 29-joint stiffness and effort limits")
         self.target_scale = 0.25 * self.effort_limits / self.kp
         self.reset()
-        logger.info("Loaded UFO M0 motion %s (%d frames)", self.motion.path, self.motion.num_frames)
+        if self.motion is not None:
+            logger.info("Loaded UFO M0 motion %s (%d frames)", self.motion.path, self.motion.num_frames)
+        else:
+            logger.info("UFO M0 actor will read z from LatentCtrl")
 
     def reset(self):
         self.frame = 0
@@ -79,7 +85,7 @@ class UfoM0Policy(Policy):
     def post_step_callback(self, commands=None):
         if any(cmd in ("[MOTION_RESET]", "[MOTION_FADE_IN]") for cmd in commands or []):
             self.reset()
-        elif self.tracking_enabled:
+        elif self.motion is not None and self.tracking_enabled:
             if self.frame >= self.motion.num_frames - 2:
                 self.motion_done = True
             else:
@@ -93,7 +99,7 @@ class UfoM0Policy(Policy):
         self.motion_done = False
 
     def get_init_dof_pos(self) -> np.ndarray:
-        return self.motion.dof_pos[0].copy()
+        return self.motion.dof_pos[0].copy() if self.motion is not None else self.default_dof_pos.copy()
 
     def get_observation(self, env_data, ctrl_data) -> tuple[np.ndarray, dict]:
         dof_pos = np.asarray(env_data.dof_pos, dtype=np.float32) - self.default_dof_pos
@@ -111,15 +117,26 @@ class UfoM0Policy(Policy):
         state = np.concatenate([dof_pos, dof_vel, gravity, base_ang_vel])
         # M0 training queries the newest-first history before inserting this frame.
         history = np.concatenate([np.concatenate(list(self.history[key])) for key in HISTORY_KEYS])
-        obs = np.concatenate([state, self.last_action, history, self.z[self.frame]])
+        if self.motion is None:
+            source = ctrl_data.get("LatentCtrl", {})
+            if not source.get("valid", False):
+                raise ValueError("UFO video latent is not ready")
+            z = np.asarray(source["z"], dtype=np.float32)
+            if z.shape != (256,) or not np.all(np.isfinite(z)):
+                raise ValueError("Invalid UFO video latent")
+            extras = {"latent_frame": source["frame_id"], "latent_age": source["age"]}
+        else:
+            z = self.z[self.frame]
+            extras = {
+                "reference_frame": self.frame + 1,
+                "reference_qpos": self.motion.qpos_at(self.frame + 1),
+            }
+        obs = np.concatenate([state, self.last_action, history, z])
         for key in HISTORY_KEYS:
             self.history[key].appendleft(values[key].copy())
         if obs.shape != (721,) or not np.all(np.isfinite(obs)):
             raise ValueError("Invalid UFO M0 actor observation")
-        return obs.astype(np.float32), {
-            "reference_frame": self.frame + 1,
-            "reference_qpos": self.motion.qpos_at(self.frame + 1),
-        }
+        return obs.astype(np.float32), extras
 
     def get_action(self, obs: np.ndarray) -> np.ndarray:
         raw = self.actor_session.run(["action"], {"actor_obs": obs[None].astype(np.float32)})[0]

@@ -1,5 +1,7 @@
 """UFO original G1 M0 deployment parameters."""
 
+from typing import Literal
+
 from robojudo.config import ASSETS_DIR
 from robojudo.config.g1.env.g1_env_cfg import G1_29DoF
 from robojudo.policy.policy_cfgs import PolicyCfg
@@ -39,6 +41,7 @@ class G1UfoM0PolicyCfg(PolicyCfg):
     robot: str = "g1"
     disable_autoload: bool = True
     model_dir: str = (ASSETS_DIR / "models/g1/ufo_m0").as_posix()
+    latent_source: Literal["motion", "controller"] = "motion"
     motion_path: str = "~/data/lafan/lafan_g1_npz/walk1_subject1.npz"
     start_frame: int = 0
     max_frames: int | None = 500

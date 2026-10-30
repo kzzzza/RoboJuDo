@@ -48,3 +48,10 @@
 - MuJoCo 参考虚影和 EGL 无头视频是 `MujocoEnv` 的通用功能；策略在 `extras["reference_qpos"]` 传入下一控制帧完整的模型 `qpos`，用法见 `docs/mujoco_rendering.md`。UFO 默认使用浅色背景；ONNX 模型文件仅保留本地，不纳入 Git。
 - UFO M0 真机配置为 `g1_ufo_m0_real`，仍通过 `scripts/run_pipeline.py` 运行并沿用 RoboJuDo 的 `UnitreeCppEnv`。启动前运行只读 `scripts/check_ufo_m0_real.py`，并设置 `UFO_REAL_ROBOT_OK=1`。其 `prepare()` 有意不自动下发，需遥控器 A 初始化站姿、R1 允许策略、B 开始跟踪；R2 锁定停止，完成站姿初始化后可在释放 R1/B 后用 R1+B 重新启动，未完成站姿则需重按 A。故障停止需要检查后重启进程。详见 `docs/ufo_m0.md`。
 - UFO M0 Actor 的四帧历史按新到旧排列，先读历史再加入当前帧；本地 Actor/B 文件由 `assets/models/g1/ufo_m0/artifact_manifest.json` 记录哈希，不提交 ONNX。Real 配置单独启用关节位置及逐帧变化保护，其他策略默认不启用。
+
+## UFO M0 视频潜变量输入
+
+- `g1_ufo_video_file`、`g1_ufo_video_stream` 和对应的 `_real_` 配置复用 `UfoM0Pipeline`、`UfoM0Policy` 与现有真机保护。唯一 `LatentCtrl` 支持离线 `z.npy`/时间戳和本机 Unix socket 两种来源；Actor 仍需要机器人反馈与四帧历史。
+- `robojudo/video/` 的视觉前端在独立进程运行，负责检测、HMR2、TCAM 和原始/TCN/MLP `u→z`；50 Hz 控制进程只消费 `float32[256]`、帧号和采集时间。完整视频算法和 50 帧滚动窗口流式算法不同，实验结果不可混称。模型包及实验输出留在 Git 忽略的 `.local/`，视觉依赖在 `.venv-video/`，具体命令见 `docs/ufo_video.md`。
+- 本机完整视觉流式进程处理 46.9 秒视频需 101–141 秒，三组 `z` 全部超过 2 秒时限，控制器拒绝策略输出；不要将 transport 模式的预计算 `z` 回放当成实时视觉通过，也不要据此启用真机视频跟随。
+- 桌面摄像头演示使用 `scripts/run_ufo_camera_demo.py --variant tcn`，同时打开 RGB 与 MuJoCo 窗口；Azure Kinect 经 `robojudo/video/azure_kinect.py` 的 libk4a 读取。演示专用配置 `g1_ufo_video_camera` 放宽潜变量时效以观察动作，不能据此判断真机延迟合格。

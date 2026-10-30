@@ -90,6 +90,8 @@ celerybeat-schedule
 
 # Environments
 .venv
+.venv-video/
+.local/
 venv/
 venv.bak/
 

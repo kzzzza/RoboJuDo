@@ -196,11 +196,15 @@ class MujocoEnv(Environment):
             self.update(simple=True)
         self.update(simple=False)
 
+        self.render_frame()
+        if self.video_recorder is not None:
+            self.video_recorder.write_frame(self.data)
+
+    def render_frame(self):
+        """Draw the current state without advancing physics (for source warmup)."""
         if self.viewer is not None and self.viewer.is_alive:
             self.viewer.cam.lookat = self.data.qpos[:3]
             self.viewer.render()
-        if self.video_recorder is not None:
-            self.video_recorder.write_frame(self.data)
 
     def set_reference_qpos(self, qpos):
         if self.reference_ghost is not None:

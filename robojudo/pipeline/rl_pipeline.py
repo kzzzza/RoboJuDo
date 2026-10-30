@@ -89,6 +89,11 @@ class RlPipeline(Pipeline):
             self.self_check()
             self.policy.reset()  # reset frame counter after dry-run steps
         except BaseException:
+            if hasattr(self, "ctrl_manager"):
+                try:
+                    self.ctrl_manager.shutdown()
+                except Exception:
+                    logger.exception("Controller cleanup failed during pipeline initialization")
             try:
                 self.env.shutdown()
             except Exception:

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from robojudo.config import ASSETS_DIR, Config
 
 
@@ -161,3 +163,16 @@ class TwistRedisCtrlCfg(CtrlCfg):
     redis_key: str = "action_mimic_g1"  # key to get command data from redis
 
     buffer_size: int = 5  # size of the data buffer to store recent commands
+
+
+class LatentCtrlCfg(CtrlCfg):
+    """A timestamped 256-D latent, from a file or a local vision process."""
+
+    ctrl_type: str = "LatentCtrl"
+    source: Literal["file", "socket"] = "file"
+    z_dir: str = ""
+    socket_path: str = "/tmp/robojudo_ufo_latent.sock"
+    variant: Literal["original", "tcn", "mlp"] = "original"
+    control_dt: float = 0.02
+    stale_seconds: float = 0.25
+    max_age_seconds: float = 2.0

@@ -30,6 +30,10 @@ class Controller(ABC):
     def post_step_callback(self, commands: list[str] | None = None):
         return
 
+    def shutdown(self):
+        """Release optional controller resources on pipeline exit."""
+        return
+
     # @abstractmethod
     def process_triggers(self, ctrl_data):
         commands = []  # TODO

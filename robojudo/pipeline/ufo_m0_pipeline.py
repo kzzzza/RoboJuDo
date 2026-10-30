@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 
 import numpy as np
 
@@ -14,12 +15,16 @@ logger = logging.getLogger(__name__)
 
 @pipeline_registry.register
 class UfoM0Pipeline(RlPipeline):
+    _video_mode = False
     INIT_STEPS = 500
     RETURN_SECONDS = 5.0
     BUTTONS = ("A", "B", "X", "R1", "R2")
 
     def __init__(self, cfg):
         self._real_mode = not cfg.env.is_sim
+        self._video_mode = cfg.policy.latent_source == "controller"
+        if self._real_mode and self._video_mode and not cfg.video_real_enabled:
+            raise RuntimeError("Video Real is disabled until sim and latency qualification passes")
         if self._real_mode and os.environ.get("UFO_REAL_ROBOT_OK") != "1":
             raise RuntimeError("Real UFO M0 control requires UFO_REAL_ROBOT_OK=1")
         self._feedback_valid_cycle = False
@@ -29,6 +34,9 @@ class UfoM0Pipeline(RlPipeline):
 
     def reset(self):
         super().reset()
+        self.video_metrics = []
+        if self._video_mode:
+            self._latent_ctrl().set_playing(not self._real_mode)
         if self._real_mode:
             self.real_state = "DISARMED"
             self._fault_stop = False
@@ -42,9 +50,84 @@ class UfoM0Pipeline(RlPipeline):
             self._return_step = 0
             self.policy.policy.set_tracking_enabled(False)
         else:
-            motion = self.policy.policy.motion
-            self.env.reborn(motion.first_qpos(), motion.first_qvel())
+            if self._video_mode:
+                qpos = self.env.model.qpos0.copy()
+                qpos[-29:] = self.env.dof_cfg.default_pos
+                self.env.reborn(qpos, np.zeros(self.env.model.nv))
+                self._video_seen = False
+                self._video_sim_return_step = 0
+                self._video_sim_return_start = None
+                self.video_sim_done = False
+            else:
+                motion = self.policy.policy.motion
+                self.env.reborn(motion.first_qpos(), motion.first_qvel())
             self.env.update()
+
+    def _latent_ctrl(self):
+        return self.ctrl_manager.controllers["LatentCtrl"].inst
+
+    def _source_reset(self):
+        self.policy.policy.reset_reference()
+        if self._video_mode:
+            controller = self._latent_ctrl()
+            if controller.cfg_ctrl.source == "file":
+                controller.reset()
+
+    def _source_play(self, enabled: bool):
+        self.policy.policy.set_tracking_enabled(enabled)
+        if self._video_mode:
+            self._latent_ctrl().set_playing(enabled)
+
+    def _source_done(self) -> bool:
+        return self._latent_ctrl().ended if self._video_mode else self.policy.policy.motion_done
+
+    def _video_sim_step(self, ctrl_data, dry_run):
+        if dry_run:
+            return True
+        if self.video_sim_done:
+            self.env.step(np.asarray(self.env.dof_cfg.default_pos, dtype=np.float32))
+            self.timestep += 1
+            return True
+        source = ctrl_data["LatentCtrl"]
+        if source["ended"] and self._video_sim_return_start is None:
+            self._video_sim_return_start = np.asarray(self.env.dof_pos, dtype=np.float32).copy()
+            self._source_play(False)
+        if self._video_sim_return_start is not None:
+            self._video_sim_return_step += 1
+            total = max(1, int(self.RETURN_SECONDS * self.freq))
+            alpha = min(self._video_sim_return_step / total, 1.0)
+            standing = np.asarray(self.env.dof_cfg.default_pos, dtype=np.float32)
+            self.env.step((1 - alpha) * self._video_sim_return_start + alpha * standing)
+            if self._video_sim_return_step >= total:
+                self.video_sim_done = True
+            self.timestep += 1
+            return True
+        if not source["valid"]:
+            if self._video_seen:
+                raise RuntimeError("Video latent source became stale")
+            # Show the initial standing pose without letting it fall while
+            # the camera and visual models warm up.
+            if self.env.cfg_env.render:
+                self.env.render_frame()
+                self.timestep += 1
+            return True
+        self._video_seen = True
+        return False
+
+    def post_step_callback(self, env_data, ctrl_data, extras, pd_target):
+        if self._video_mode and self.env.cfg_env.is_sim and "latent_frame" in extras:
+            source = ctrl_data["LatentCtrl"]
+            captured_at = self._latent_ctrl().capture_time
+            age = None if captured_at is None else max(0.0, time.monotonic() - captured_at)
+            gravity = get_gravity_orientation(self.env.base_quat)
+            tilt = float(np.arccos(np.clip(-gravity[2], -1.0, 1.0)))
+            self.video_metrics.append({
+                "step": self.timestep, "latent_frame": int(source["frame_id"]),
+                "capture_to_pd_s": age,
+                "base_height_m": float(self.env.data.qpos[2]),
+                "base_tilt_rad": tilt,
+            })
+        super().post_step_callback(env_data, ctrl_data, extras, pd_target)
 
     def prepare(self, init_motor_angle=None, prepare_seconds=None):
         if self._real_mode:
@@ -75,7 +158,7 @@ class UfoM0Pipeline(RlPipeline):
         self.real_state = "STOPPED"
         self._fault_stop = self._fault_stop or fault
         self._released_after_stop = False
-        self.policy.policy.set_tracking_enabled(False)
+        self._source_play(False)
 
     def _check_feedback(self, env_data):
         for key, size in (("dof_pos", 29), ("dof_vel", 29), ("base_quat", 4), ("base_ang_vel", 3)):
@@ -106,12 +189,18 @@ class UfoM0Pipeline(RlPipeline):
         )
         self._return_step = 0
         self.real_state = "RETURNING"
-        self.policy.policy.set_tracking_enabled(False)
+        self._source_play(False)
         logger.info("UFO M0 motion completed; returning to standing pose")
 
     def pre_policy_step(self, env_data, ctrl_data, dry_run=False) -> bool:
-        if not self._real_mode or dry_run:
-            return False
+        if not self._real_mode:
+            return self._video_sim_step(ctrl_data, dry_run) if self._video_mode else False
+        if dry_run:
+            return self._video_mode
+        if not self._video_mode:
+            source = None
+        else:
+            source = ctrl_data["LatentCtrl"]
 
         buttons = self._button_snapshot(ctrl_data)
         if buttons["R2"]:
@@ -135,9 +224,11 @@ class UfoM0Pipeline(RlPipeline):
             if (
                 not self._fault_stop and self._standing_ready
                 and self._released_after_stop and combo and not previous_combo
+                and (source is None or source["valid"])
             ):
                 self.policy.reset()
-                self.policy.policy.set_tracking_enabled(True)
+                self._source_reset()
+                self._source_play(True)
                 self.real_state = "TRACKING"
                 logger.info("UFO M0 Real rearmed with R1+B")
                 self._previous_buttons = buttons
@@ -154,7 +245,7 @@ class UfoM0Pipeline(RlPipeline):
             self._init_step = 0
             self._standing_ready = False
             self.policy.reset()
-            self.policy.policy.set_tracking_enabled(False)
+            self._source_play(False)
             self.real_state = "INITIALIZING"
             logger.info("UFO M0 Real standing initialization started")
 
@@ -176,24 +267,32 @@ class UfoM0Pipeline(RlPipeline):
 
         if self.real_state == "STANDING":
             if self._pressed(buttons, "R1"):
-                self.policy.policy.reset_reference()
-                self.policy.policy.set_tracking_enabled(False)
+                self._source_reset()
+                self._source_play(False)
                 self.real_state = "ENABLED"
                 self._previous_buttons = buttons
-                return False
+                if not self._video_mode or self._latent_ctrl().cfg_ctrl.source == "file":
+                    return False
+                return self._finish_handled(ctrl_data, buttons)
             self.env.step(standing)
             return self._finish_handled(ctrl_data, buttons)
 
         if self._pressed(buttons, "X"):
-            self.policy.policy.reset_reference()
-            self.policy.policy.set_tracking_enabled(False)
+            if self._video_mode and self._latent_ctrl().cfg_ctrl.source == "socket":
+                self._begin_return()
+                return self._finish_handled(ctrl_data, buttons)
+            self._source_reset()
+            self._source_play(False)
             self.real_state = "ENABLED"
             self._previous_buttons = buttons
             return False
 
         if self.real_state == "ENABLED" and self._pressed(buttons, "B"):
-            self.policy.policy.reset_reference()
-            self.policy.policy.set_tracking_enabled(True)
+            if source is not None and not source["valid"]:
+                self.env.step(standing)
+                return self._finish_handled(ctrl_data, buttons)
+            self._source_reset()
+            self._source_play(True)
             self.real_state = "TRACKING"
 
         if self.real_state == "RETURNING":
@@ -207,6 +306,19 @@ class UfoM0Pipeline(RlPipeline):
                 logger.info("UFO M0 Real returned to standing pose")
             return self._finish_handled(ctrl_data, buttons)
 
+        if source is not None:
+            if self.real_state == "ENABLED" and self._latent_ctrl().cfg_ctrl.source == "socket":
+                self.env.step(standing)
+                return self._finish_handled(ctrl_data, buttons)
+            if self.real_state == "TRACKING" and source["ended"]:
+                self._begin_return()
+                return self._finish_handled(ctrl_data, buttons)
+            if self.real_state == "TRACKING" and not source["valid"]:
+                self._enter_stop("video latent source stale or invalid", fault=True)
+                if self._has_actuated:
+                    self._send_hold()
+                return self._finish_handled(ctrl_data, buttons)
+
         self._previous_buttons = buttons
         return False
 
@@ -216,7 +328,7 @@ class UfoM0Pipeline(RlPipeline):
         try:
             super().step(dry_run=dry_run)
             if self._real_mode and not dry_run and self.real_state == "TRACKING":
-                if self.policy.policy.motion_done:
+                if self._source_done():
                     self._begin_return()
         except Exception as exc:
             if not self._real_mode or dry_run:

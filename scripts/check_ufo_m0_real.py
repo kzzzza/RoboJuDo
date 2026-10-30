@@ -50,11 +50,15 @@ def check_host(net_if: str):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", choices=("g1_ufo_m0_real", "g1_ufo_video_real_file",
+                                             "g1_ufo_video_real_stream"), default="g1_ufo_m0_real")
     parser.add_argument("--motion-path", help="Override the configured LAFAN G1 motion")
+    parser.add_argument("--latent-dir", help="Directory containing z.npy and timestamps.npy for video-file control")
+    parser.add_argument("--latent-variant", choices=("original", "tcn", "mlp"), default="original")
     parser.add_argument("--offline", action="store_true", help="Skip host driver and network checks")
     args = parser.parse_args()
 
-    cfg = ConfigManager("g1_ufo_m0_real").get_cfg()
+    cfg = ConfigManager(args.config).get_cfg()
     if cfg.env.env_type != "UnitreeCppEnv" or cfg.env.dof.num_dofs != 29:
         raise ValueError("Unexpected UFO M0 Real environment configuration")
     model_dir = Path(cfg.policy.model_dir).expanduser()
@@ -65,33 +69,53 @@ def main():
     if metadata["actor_obs_dim"] != 721 or metadata["z_dim"] != 256:
         raise ValueError("Model metadata dimensions differ from UFO M0")
 
-    motion_path = args.motion_path or cfg.policy.motion_path
-    motion = UfoM0Motion(
-        motion_path,
-        default_pos=np.asarray(cfg.env.dof.default_pos, dtype=np.float32),
-        start_frame=cfg.policy.start_frame,
-        max_frames=cfg.policy.max_frames,
-    )
-    motion_arrays = (motion.dof_pos, motion.dof_vel, motion.body_pos, motion.body_quat,
-                     motion.body_vel, motion.body_ang_vel)
-    if motion.num_frames < 2 or any(not np.all(np.isfinite(values)) for values in motion_arrays):
-        raise ValueError("Motion needs at least two finite frames throughout")
-    state, privileged = motion.backward_inputs(1, 2)
-    if state.shape != (1, 64) or privileged.shape != (1, 463):
-        raise ValueError("Unexpected B network motion input shape")
-    if not np.all(np.isfinite(state)) or not np.all(np.isfinite(privileged)):
-        raise ValueError("Non-finite B network motion input")
-
     providers = ["CPUExecutionProvider"]
-    backward = ort.InferenceSession(str(model_dir / "backward_encoder.onnx"), providers=providers)
     actor = ort.InferenceSession(str(model_dir / "FBcprAuxModel.onnx"), providers=providers)
-    if {item.name: item.shape[-1] for item in backward.get_inputs()} != {
-        "state": 64, "privileged_state": 463,
-    }:
-        raise ValueError("Unexpected B network input contract")
     if [(item.name, item.shape[-1]) for item in actor.get_inputs()] != [("actor_obs", 721)]:
         raise ValueError("Unexpected actor input contract")
-    z = backward.run(["z"], {"state": state, "privileged_state": privileged})[0]
+    motion = None
+    if cfg.policy.latent_source == "motion":
+        motion_path = args.motion_path or cfg.policy.motion_path
+        motion = UfoM0Motion(
+            motion_path,
+            default_pos=np.asarray(cfg.env.dof.default_pos, dtype=np.float32),
+            start_frame=cfg.policy.start_frame,
+            max_frames=cfg.policy.max_frames,
+        )
+        motion_arrays = (motion.dof_pos, motion.dof_vel, motion.body_pos, motion.body_quat,
+                         motion.body_vel, motion.body_ang_vel)
+        if motion.num_frames < 2 or any(not np.all(np.isfinite(values)) for values in motion_arrays):
+            raise ValueError("Motion needs at least two finite frames throughout")
+        state, privileged = motion.backward_inputs(1, 2)
+        if state.shape != (1, 64) or privileged.shape != (1, 463):
+            raise ValueError("Unexpected B network motion input shape")
+        if not np.all(np.isfinite(state)) or not np.all(np.isfinite(privileged)):
+            raise ValueError("Non-finite B network motion input")
+        backward = ort.InferenceSession(str(model_dir / "backward_encoder.onnx"), providers=providers)
+        if {item.name: item.shape[-1] for item in backward.get_inputs()} != {
+            "state": 64, "privileged_state": 463,
+        }:
+            raise ValueError("Unexpected B network input contract")
+        z = backward.run(["z"], {"state": state, "privileged_state": privileged})[0]
+    elif args.config.endswith("_file"):
+        if not args.latent_dir:
+            parser.error("--latent-dir is required for g1_ufo_video_real_file")
+        directory = Path(args.latent_dir).expanduser()
+        z_values = np.load(directory / "z.npy", allow_pickle=False)
+        times = np.load(directory / "timestamps.npy", allow_pickle=False)
+        metadata_path = directory / "latent_metadata.json"
+        if metadata_path.exists() and json.loads(metadata_path.read_text()).get("variant") != args.latent_variant:
+            raise ValueError("Video latent variant does not match metadata")
+        if (z_values.dtype != np.float32 or z_values.ndim != 2 or z_values.shape[1] != 256
+                or not len(z_values) or times.shape != (len(z_values),)
+                or not np.isfinite(z_values).all() or not np.isfinite(times).all()
+                or np.any(np.diff(times) <= 0)
+                or not np.allclose(np.linalg.norm(z_values, axis=1), 16, atol=1e-3)):
+            raise ValueError("Invalid video z.npy/timestamps.npy")
+        z = z_values[:1]
+    else:
+        z = np.zeros((1, 256), dtype=np.float32)
+        z[0, 0] = 16.0
     if z.shape != (1, 256) or not np.all(np.isfinite(z)):
         raise ValueError("Invalid B network output")
     actor_obs = np.zeros((1, 721), dtype=np.float32)
@@ -104,8 +128,10 @@ def main():
         check_host(cfg.env.unitree.net_if)
     print(json.dumps({
         "status": "passed", "control_environment_created": False,
-        "model_sha256": digests, "motion": str(motion.path),
-        "motion_frames": motion.num_frames, "network_interface": cfg.env.unitree.net_if,
+        "model_sha256": digests, "motion": str(motion.path) if motion is not None else None,
+        "motion_frames": motion.num_frames if motion is not None else None,
+        "latent_source": cfg.policy.latent_source, "latent_variant": args.latent_variant if motion is None else None,
+        "network_interface": cfg.env.unitree.net_if,
         "host_checks": not args.offline,
     }, indent=2))
 

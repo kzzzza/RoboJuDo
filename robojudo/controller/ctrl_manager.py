@@ -47,6 +47,10 @@ class CtrlManager:
         for controller in self.controllers.values():
             controller.inst.reset()
 
+    def shutdown(self):
+        for controller in self.controllers.values():
+            controller.inst.shutdown()
+
     def post_step_callback(self, ctrl_data: Box):
         """
         Call post step callback for all controllers.
