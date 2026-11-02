@@ -30,6 +30,8 @@ def parse_args():
     parser.add_argument("--latent-dir", help="Directory with z.npy and timestamps.npy for a video-file config")
     parser.add_argument("--latent-variant", choices=("original", "tcn", "mlp"), default="original")
     parser.add_argument("--latent-socket", default="/tmp/robojudo_ufo_latent.sock")
+    parser.add_argument("--latent-port", type=int, default=5541,
+                        help="Jetson loopback TCP port for SSH-forwarded video z")
     parser.add_argument("--max-steps", type=int, default=None, help="Stop after this many control cycles")
     parser.add_argument("--metrics-json", help="Write video experiment metrics to this JSON path")
     args = parser.parse_args()
@@ -57,8 +59,12 @@ def main():
                 if not args.latent_dir:
                     raise ValueError("--latent-dir is required for a video-file config")
                 controller.z_dir = args.latent_dir
-            else:
+            elif controller.source == "socket":
                 controller.socket_path = args.latent_socket
+            elif controller.source == "tcp":
+                if not 1 <= args.latent_port <= 65535:
+                    raise ValueError("--latent-port must be between 1 and 65535")
+                controller.tcp_port = args.latent_port
             if args.video_content == "comparison":
                 raise ValueError("Video z has no reference qpos; use --video-content actual")
     if args.record_video or args.show_reference:

@@ -166,12 +166,13 @@ class TwistRedisCtrlCfg(CtrlCfg):
 
 
 class LatentCtrlCfg(CtrlCfg):
-    """A timestamped 256-D latent, from a file or a local vision process."""
+    """A timestamped 256-D latent from file, local socket, or SSH-forwarded TCP."""
 
     ctrl_type: str = "LatentCtrl"
-    source: Literal["file", "socket"] = "file"
+    source: Literal["file", "socket", "tcp"] = "file"
     z_dir: str = ""
     socket_path: str = "/tmp/robojudo_ufo_latent.sock"
+    tcp_port: int = 5541
     variant: Literal["original", "tcn", "mlp"] = "original"
     control_dt: float = 0.02
     stale_seconds: float = 0.25

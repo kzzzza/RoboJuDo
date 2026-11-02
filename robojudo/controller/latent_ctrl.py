@@ -11,6 +11,7 @@ import numpy as np
 from robojudo.controller import Controller, ctrl_registry
 from robojudo.controller.ctrl_cfgs import LatentCtrlCfg
 from robojudo.video.latent_packet import PACKET_BYTES, decode_packet
+from robojudo.video.latent_transport import LatestTcpReceiver
 
 
 @ctrl_registry.register
@@ -20,6 +21,8 @@ class LatentCtrl(Controller):
     def __init__(self, cfg_ctrl: LatentCtrlCfg, env=None, device="cpu"):
         super().__init__(cfg_ctrl, env, device)
         self.socket = None
+        self.tcp_receiver = None
+        self.tcp_session = -1
         self.z = None
         self.frame_id = -1
         self.capture_time = None
@@ -41,7 +44,7 @@ class LatentCtrl(Controller):
                 raise ValueError("Invalid z.npy / timestamps.npy")
             if not np.allclose(np.linalg.norm(self.zs, axis=1), 16.0, atol=1e-3):
                 raise ValueError("Unexpected UFO latent norm")
-        else:
+        elif cfg_ctrl.source == "socket":
             self.zs = None
             self.timestamps = None
             path = Path(cfg_ctrl.socket_path)
@@ -51,6 +54,12 @@ class LatentCtrl(Controller):
             self.socket.bind(str(path))
             os.chmod(path, 0o600)
             self.socket.setblocking(False)
+        elif cfg_ctrl.source == "tcp":
+            self.zs = None
+            self.timestamps = None
+            self.tcp_receiver = LatestTcpReceiver(cfg_ctrl.tcp_port)
+        else:
+            raise ValueError(f"Unknown latent source: {cfg_ctrl.source}")
         self.reset()
 
     def reset(self):
@@ -88,6 +97,33 @@ class LatentCtrl(Controller):
             self.received_time = time.monotonic()
             self.ended = eof
 
+    def _poll_tcp(self):
+        active_session = self.tcp_receiver.active_session()
+        if active_session != self.tcp_session:
+            self.tcp_session = active_session
+            self.frame_id = -1
+            self.z = None
+            self.capture_time = None
+            self.received_time = None
+            self.ended = False
+        latest = self.tcp_receiver.get_latest()
+        if latest is None:
+            return
+        session, variant, sequence, capture_time, received_time, z, eof = latest
+        if session != active_session:
+            return
+        if sequence <= self.frame_id:
+            return
+        if variant != self.cfg_ctrl.variant or not np.isclose(np.linalg.norm(z), 16.0, atol=1e-3):
+            self.z = None
+            self.frame_id = sequence
+            return
+        self.z = z
+        self.frame_id = sequence
+        self.capture_time = capture_time
+        self.received_time = received_time
+        self.ended = eof
+
     def get_data(self):
         if self.zs is not None:
             index = int(np.searchsorted(self.timestamps, self.play_time, side="right") - 1)
@@ -95,14 +131,19 @@ class LatentCtrl(Controller):
             self.z = self.zs[self.frame_id].copy()
             self.ended = self.play_time > float(self.timestamps[-1]) + self.cfg_ctrl.control_dt * 0.5
             return {"z": self.z, "valid": True, "ended": self.ended,
-                    "frame_id": self.frame_id, "age": 0.0}
-        self._poll_socket()
+                    "frame_id": self.frame_id, "age": 0.0, "capture_time": None}
+        if self.tcp_receiver is not None:
+            self._poll_tcp()
+        else:
+            self._poll_socket()
         now = time.monotonic()
         age = float("inf") if self.capture_time is None else max(0.0, now - self.capture_time)
         idle = float("inf") if self.received_time is None else now - self.received_time
         valid = self.z is not None and age <= self.cfg_ctrl.max_age_seconds and idle <= self.cfg_ctrl.stale_seconds
+        if self.tcp_receiver is not None:
+            valid = valid and self.tcp_receiver.link_ready()
         return {"z": self.z.copy() if valid else None, "valid": valid, "ended": self.ended,
-                "frame_id": self.frame_id, "age": age}
+                "frame_id": self.frame_id, "age": age, "capture_time": self.capture_time}
 
     def post_step_callback(self, commands=None):
         if self.zs is not None and self.playing and not self.ended:
@@ -112,3 +153,5 @@ class LatentCtrl(Controller):
         if self.socket is not None:
             self.socket.close()
             Path(self.cfg_ctrl.socket_path).unlink(missing_ok=True)
+        if self.tcp_receiver is not None:
+            self.tcp_receiver.close()

@@ -26,15 +26,16 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def check_artifacts(model_dir: Path, manifest_path: Path):
+def check_artifacts(model_dir: Path, manifest_path: Path, names=None):
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("version") != 1:
         raise ValueError("Unsupported UFO M0 artifact manifest")
-    for name, expected in manifest["sha256"].items():
+    expected_files = manifest["sha256"] if names is None else {name: manifest["sha256"][name] for name in names}
+    for name, expected in expected_files.items():
         actual = sha256(model_dir / name)
         if actual != expected:
             raise ValueError(f"SHA256 mismatch for {name}: {actual} != {expected}")
-    return manifest["sha256"]
+    return expected_files
 
 
 def check_host(net_if: str):
@@ -62,7 +63,13 @@ def main():
     if cfg.env.env_type != "UnitreeCppEnv" or cfg.env.dof.num_dofs != 29:
         raise ValueError("Unexpected UFO M0 Real environment configuration")
     model_dir = Path(cfg.policy.model_dir).expanduser()
-    digests = check_artifacts(model_dir, MANIFEST)
+    video_stream = args.config == "g1_ufo_video_real_stream"
+    actor_files = ("FBcprAuxModel.onnx", "FBcprAuxModel.meta.json")
+    digests = check_artifacts(model_dir, MANIFEST, actor_files if video_stream else None)
+    if video_stream:
+        latent = next(ctrl for ctrl in cfg.ctrl if ctrl.ctrl_type == "LatentCtrl")
+        if not cfg.video_real_enabled or not cfg.auto_debug_mode or latent.source != "tcp":
+            raise ValueError("Video Real stream must use the guarded TCP and automatic debug-mode configuration")
     metadata = json.loads((model_dir / "FBcprAuxModel.meta.json").read_text())
     if metadata["control_joint_names"] != cfg.env.dof.joint_names:
         raise ValueError("Model and real robot joint order differ")
@@ -126,6 +133,8 @@ def main():
 
     if not args.offline:
         check_host(cfg.env.unitree.net_if)
+        if video_stream and importlib.util.find_spec("unitree_sdk2py") is None:
+            raise RuntimeError("unitree_sdk2py is required for automatic G1 debug mode")
     print(json.dumps({
         "status": "passed", "control_environment_created": False,
         "model_sha256": digests, "motion": str(motion.path) if motion is not None else None,

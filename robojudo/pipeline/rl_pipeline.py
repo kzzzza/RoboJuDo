@@ -221,6 +221,10 @@ class RlPipeline(Pipeline):
         """Return True when a specialized pipeline handled this control cycle."""
         return False
 
+    def before_env_step(self, env_data, ctrl_data, extras, pd_target):
+        """Optional final validation after inference and before actuation."""
+        pass
+
     def step(self, dry_run=False):
         self.env.update()
         env_data = self.env.get_data()
@@ -255,6 +259,7 @@ class RlPipeline(Pipeline):
             self._blend_out_step += 1
 
         if not dry_run:
+            self.before_env_step(env_data, ctrl_data, extras, pd_target)
             self.update_reference_visualization(extras)
             self.env.step(pd_target, extras.get("hand_pose", None))
 

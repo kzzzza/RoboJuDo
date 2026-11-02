@@ -6,15 +6,18 @@ import socket
 import sys
 import time
 from collections import deque
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
 
 try:
     from .latent_packet import VARIANTS, encode_packet
+    from .latent_transport import LatestTcpSender
     from .vision_source import CameraPreview, camera_frames, replay_video
 except ImportError:  # standalone worker process uses this directory without importing RoboJuDo
     from latent_packet import VARIANTS, encode_packet
+    from latent_transport import LatestTcpSender
     from vision_source import CameraPreview, camera_frames, replay_video
 
 
@@ -197,7 +200,8 @@ class VisionWorker:
     def run(self, *, video: str | None, camera: int | None, socket_path: str,
             metrics_path: str | None, output_dir: str | None = None,
             camera_backend: str = "opencv", show_camera: bool = False,
-            show_detection_box: bool = False):
+            show_detection_box: bool = False, tcp_host: str | None = None,
+            tcp_port: int = 5541, healthcheck=None):
         if (video is None) == (camera is None):
             raise ValueError("Choose exactly one video or camera source")
         if show_detection_box and (video is not None or not show_camera):
@@ -205,20 +209,37 @@ class VisionWorker:
         source = (replay_video(video) if video is not None else
                   camera_frames(camera, backend=camera_backend))
         endpoint = Path(socket_path)
-        deadline = time.monotonic() + 30.0
-        while not endpoint.exists():
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"Control socket did not appear: {endpoint}")
-            time.sleep(0.05)
+        if tcp_host is None:
+            deadline = time.monotonic() + 30.0
+            while not endpoint.exists():
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"Control socket did not appear: {endpoint}")
+                time.sleep(0.05)
         preview = CameraPreview(show_detection_box=show_detection_box) if show_camera else None
+
+        def on_frame(frame, detected_box):
+            if healthcheck is not None:
+                healthcheck()
+            return preview.show(frame, detected_box) if preview is not None else True
+
+        network_sender = None
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            with ExitStack() as stack:
+                if tcp_host is None:
+                    sock = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM))
+                else:
+                    network_sender = LatestTcpSender(tcp_host, tcp_port)
+                    stack.callback(network_sender.close)
                 for frame, z, eof in self.process(
                     source, finalize=video is not None,
-                    on_frame=preview.show if preview is not None else None,
+                    on_frame=on_frame if preview is not None or healthcheck is not None else None,
                 ):
                     try:
-                        sock.sendto(encode_packet(self.variant, frame.index, frame.captured_at, z, eof=eof), str(endpoint))
+                        packet = encode_packet(self.variant, frame.index, frame.captured_at, z, eof=eof)
+                        if network_sender is None:
+                            sock.sendto(packet, str(endpoint))
+                        else:
+                            network_sender.send(packet)
                         self.capture_to_send.append(time.monotonic() - frame.captured_at)
                     except OSError:
                         # Keep the visual comparison after a control-side stale fault.
@@ -244,6 +265,7 @@ class VisionWorker:
         if metrics_path:
             data = {"variant": self.variant, "frames_read": self.frame_count,
                     "latents_emitted": self.result_count, "socket_send_failures": self.send_failures,
+                    "tcp_packets_sent": network_sender.sent if network_sender is not None else None,
                     "frames_dropped": self.frame_count - self.result_count,
                     "window_inference_p50_s": float(np.percentile(self.inference_seconds, 50)) if self.inference_seconds else None,
                     "window_inference_p95_s": float(np.percentile(self.inference_seconds, 95)) if self.inference_seconds else None,

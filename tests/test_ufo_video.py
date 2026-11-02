@@ -1,12 +1,14 @@
 """Hardware-free tests for the video latent boundary and safety state."""
 
 import json
+import os
 import socket
 import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from box import Box
@@ -62,15 +64,16 @@ class LatentCtrlTests(unittest.TestCase):
 
 
 class RealVideoStateTests(unittest.TestCase):
-    def test_real_video_requires_qualification_before_environment_creation(self):
+    def test_real_video_requires_explicit_robot_gate_before_environment_creation(self):
         cfg = ConfigManager("g1_ufo_video_real_stream").get_cfg()
-        with self.assertRaisesRegex(RuntimeError, "disabled until sim and latency"):
-            UfoM0Pipeline(cfg)
+        with patch.dict(os.environ, {"UFO_REAL_ROBOT_OK": ""}):
+            with self.assertRaisesRegex(RuntimeError, "UFO_REAL_ROBOT_OK=1"):
+                UfoM0Pipeline(cfg)
 
     def test_stream_does_not_infer_before_b_or_after_stale_fault(self):
         pipeline = fake_pipeline()
         pipeline._video_mode = True
-        latent = SimpleNamespace(cfg_ctrl=SimpleNamespace(source="socket"), ended=False,
+        latent = SimpleNamespace(cfg_ctrl=SimpleNamespace(source="tcp"), ended=False,
                                  set_playing=lambda enabled: None, reset=lambda: None)
         pipeline.ctrl_manager.controllers = {"LatentCtrl": SimpleNamespace(inst=latent)}
         pipeline.policy.motion = None
@@ -90,15 +93,12 @@ class RealVideoStateTests(unittest.TestCase):
         for _ in range(pipeline.INIT_STEPS - 1):
             cycle()
         self.assertEqual(pipeline.real_state, "STANDING")
-        cycle(R1=True)
-        self.assertEqual(pipeline.real_state, "ENABLED")
-        self.assertTrue(cycle())
         self.assertFalse(cycle(B=True))
         self.assertEqual(pipeline.real_state, "TRACKING")
         self.assertTrue(cycle(valid=False))
         self.assertEqual(pipeline.real_state, "STOPPED")
         self.assertTrue(pipeline._fault_stop)
-        self.assertTrue(cycle(R1=True, B=True))
+        self.assertTrue(cycle(A=True))
         self.assertEqual(pipeline.real_state, "STOPPED")
 
 

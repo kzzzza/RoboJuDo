@@ -43,5 +43,7 @@ class g1_ufo_video_real_file(g1_ufo_video_file):
 
 @cfg_registry.register
 class g1_ufo_video_real_stream(g1_ufo_video_real_file):
+    auto_debug_mode: bool = True
+    video_real_enabled: bool = True
     ctrl: list = [UnitreeCtrlCfg(triggers={}, combination_init_buttons=[]),
-                  LatentCtrlCfg(source="socket", stale_seconds=0.75)]
+                  LatentCtrlCfg(source="tcp", stale_seconds=5.0, max_age_seconds=5.0)]

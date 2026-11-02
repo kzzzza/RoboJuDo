@@ -1,8 +1,10 @@
-"""Run the isolated RGB-BFM worker, feeding one shared LatentCtrl socket."""
+"""Run RGB-BFM inference and feed LatentCtrl locally or over an SSH tunnel."""
 
 import argparse
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -19,11 +21,17 @@ def main():
     parser.add_argument("--packages", default=".local/rgb_bfm")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--socket", default="/tmp/robojudo_ufo_latent.sock")
+    parser.add_argument("--ssh-target", help="Jetson SSH destination, e.g. user@robot; forward z over SSH")
+    parser.add_argument("--tcp-port", type=int, default=5541, help="Loopback port on both SSH endpoints")
     parser.add_argument("--metrics-json")
     parser.add_argument("--output-dir", help="Save emitted streaming z and frame indices for comparison")
     args = parser.parse_args()
     if args.show_detection_box and (args.camera is None or not args.show_camera):
         parser.error("--show-detection-box requires --camera and --show-camera")
+    if args.ssh_target and args.ssh_target.startswith("-"):
+        parser.error("--ssh-target must be a host or user@host")
+    if not 1 <= args.tcp_port <= 65535:
+        parser.error("--tcp-port must be between 1 and 65535")
     os.environ.setdefault("YOLO_AUTOINSTALL", "false")
     runtime = Path(".local/video_runtime").resolve()
     runtime.mkdir(parents=True, exist_ok=True)
@@ -32,11 +40,38 @@ def main():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "robojudo/video"))
     from vision_worker import VisionWorker
 
-    worker = VisionWorker(Path(args.packages), args.variant, args.device)
-    count = worker.run(video=args.video, camera=args.camera, socket_path=args.socket,
-                       metrics_path=args.metrics_json, output_dir=args.output_dir,
-                       camera_backend=args.camera_backend, show_camera=args.show_camera,
-                       show_detection_box=args.show_detection_box)
+    tunnel = None
+    try:
+        if args.ssh_target:
+            tunnel = subprocess.Popen([
+                "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+                "-L", f"127.0.0.1:{args.tcp_port}:127.0.0.1:{args.tcp_port}",
+                args.ssh_target,
+            ])
+            time.sleep(0.5)
+            if tunnel.poll() is not None:
+                raise RuntimeError(f"SSH tunnel exited with status {tunnel.returncode}")
+
+        def check_tunnel():
+            if tunnel is not None and tunnel.poll() is not None:
+                raise RuntimeError(f"SSH tunnel exited with status {tunnel.returncode}")
+
+        worker = VisionWorker(Path(args.packages), args.variant, args.device)
+        count = worker.run(video=args.video, camera=args.camera, socket_path=args.socket,
+                           metrics_path=args.metrics_json, output_dir=args.output_dir,
+                           camera_backend=args.camera_backend, show_camera=args.show_camera,
+                           show_detection_box=args.show_detection_box,
+                           tcp_host="127.0.0.1" if tunnel is not None else None,
+                           tcp_port=args.tcp_port, healthcheck=check_tunnel if tunnel is not None else None)
+    finally:
+        if tunnel is not None and tunnel.poll() is None:
+            tunnel.terminate()
+            try:
+                tunnel.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                tunnel.kill()
+                tunnel.wait()
     print(f"Sent {count} {args.variant} latents")
 
 

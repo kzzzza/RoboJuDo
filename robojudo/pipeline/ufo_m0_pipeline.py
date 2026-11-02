@@ -27,6 +27,10 @@ class UfoM0Pipeline(RlPipeline):
             raise RuntimeError("Video Real is disabled until sim and latency qualification passes")
         if self._real_mode and os.environ.get("UFO_REAL_ROBOT_OK") != "1":
             raise RuntimeError("Real UFO M0 control requires UFO_REAL_ROBOT_OK=1")
+        if self._real_mode and self._video_mode and getattr(cfg, "auto_debug_mode", False):
+            from robojudo.environment.utils.g1_motion_mode import ensure_debug_mode
+
+            ensure_debug_mode(cfg.env.unitree.net_if)
         self._feedback_valid_cycle = False
         super().__init__(cfg)
         if self._real_mode:
@@ -192,15 +196,99 @@ class UfoM0Pipeline(RlPipeline):
         self._source_play(False)
         logger.info("UFO M0 motion completed; returning to standing pose")
 
+    def _video_real_step(self, env_data, ctrl_data, dry_run=False) -> bool:
+        """Camera control: A stands, B tracks z, R2 stops before inference."""
+        if dry_run:
+            return True
+        buttons = self._button_snapshot(ctrl_data)
+        source = ctrl_data["LatentCtrl"]
+        if buttons["R2"]:
+            self._enter_stop("R2", fault=False)
+            if self._has_actuated:
+                self._send_hold()
+            return self._finish_handled(ctrl_data, buttons)
+
+        self._check_feedback(env_data)
+        if self.cfg.do_safety_check and not self._attitude_is_valid():
+            self._enter_stop("invalid or fallen base attitude", fault=True)
+            if self._has_actuated:
+                self._send_hold()
+            return self._finish_handled(ctrl_data, buttons)
+
+        if self.real_state == "STOPPED":
+            # A held together with R2 cannot arm the robot after R2 is released.
+            if not buttons["A"]:
+                self._released_after_stop = True
+            if self._fault_stop or not self._released_after_stop or not self._pressed(buttons, "A"):
+                if self._has_actuated:
+                    self._send_hold()
+                return self._finish_handled(ctrl_data, buttons)
+
+        if self._pressed(buttons, "A") and self.real_state in ("DISARMED", "STOPPED", "STANDING"):
+            self._init_start = np.asarray(env_data.dof_pos, dtype=np.float64).copy()
+            self._init_step = 0
+            self._standing_ready = False
+            self.policy.reset()
+            self._source_play(False)
+            self.real_state = "INITIALIZING"
+            logger.info("UFO video Real standing initialization started")
+
+        if self.real_state == "DISARMED":
+            return self._finish_handled(ctrl_data, buttons)
+
+        standing = np.asarray(self.env.dof_cfg.default_pos, dtype=np.float64)
+        if self.real_state == "INITIALIZING":
+            self._init_step += 1
+            progress = min(self._init_step / self.INIT_STEPS, 1.0)
+            self._has_actuated = True
+            self.env.step((1.0 - progress) * self._init_start + progress * standing)
+            if self._init_step >= self.INIT_STEPS:
+                self.real_state = "STANDING"
+                self._standing_ready = True
+                logger.info("UFO video Real standing initialization completed")
+            return self._finish_handled(ctrl_data, buttons)
+
+        if self.real_state == "RETURNING":
+            self._return_step += 1
+            total = max(1, int(self.RETURN_SECONDS * self.freq))
+            progress = min(self._return_step / total, 1.0)
+            self.env.step((1.0 - progress) * self._return_start + progress * standing)
+            if self._return_step >= total:
+                self.real_state = "STANDING"
+            return self._finish_handled(ctrl_data, buttons)
+
+        if self.real_state == "STANDING":
+            if self._pressed(buttons, "B") and source["valid"]:
+                self.policy.reset()
+                self._source_reset()
+                self._source_play(True)
+                self.real_state = "TRACKING"
+                self._previous_buttons = buttons
+                return False
+            self.env.step(standing)
+            return self._finish_handled(ctrl_data, buttons)
+
+        if self.real_state == "TRACKING":
+            if self._pressed(buttons, "X") or source["ended"]:
+                self._begin_return()
+                return self._finish_handled(ctrl_data, buttons)
+            if not source["valid"]:
+                self._enter_stop("video latent source stale or invalid", fault=True)
+                if self._has_actuated:
+                    self._send_hold()
+                return self._finish_handled(ctrl_data, buttons)
+            self._previous_buttons = buttons
+            return False
+
+        raise RuntimeError(f"Unexpected UFO video Real state: {self.real_state}")
+
     def pre_policy_step(self, env_data, ctrl_data, dry_run=False) -> bool:
         if not self._real_mode:
             return self._video_sim_step(ctrl_data, dry_run) if self._video_mode else False
+        if self._video_mode:
+            return self._video_real_step(env_data, ctrl_data, dry_run)
         if dry_run:
-            return self._video_mode
-        if not self._video_mode:
-            source = None
-        else:
-            source = ctrl_data["LatentCtrl"]
+            return False
 
         buttons = self._button_snapshot(ctrl_data)
         if buttons["R2"]:
@@ -224,7 +312,6 @@ class UfoM0Pipeline(RlPipeline):
             if (
                 not self._fault_stop and self._standing_ready
                 and self._released_after_stop and combo and not previous_combo
-                and (source is None or source["valid"])
             ):
                 self.policy.reset()
                 self._source_reset()
@@ -271,16 +358,11 @@ class UfoM0Pipeline(RlPipeline):
                 self._source_play(False)
                 self.real_state = "ENABLED"
                 self._previous_buttons = buttons
-                if not self._video_mode or self._latent_ctrl().cfg_ctrl.source == "file":
-                    return False
-                return self._finish_handled(ctrl_data, buttons)
+                return False
             self.env.step(standing)
             return self._finish_handled(ctrl_data, buttons)
 
         if self._pressed(buttons, "X"):
-            if self._video_mode and self._latent_ctrl().cfg_ctrl.source == "socket":
-                self._begin_return()
-                return self._finish_handled(ctrl_data, buttons)
             self._source_reset()
             self._source_play(False)
             self.real_state = "ENABLED"
@@ -288,9 +370,6 @@ class UfoM0Pipeline(RlPipeline):
             return False
 
         if self.real_state == "ENABLED" and self._pressed(buttons, "B"):
-            if source is not None and not source["valid"]:
-                self.env.step(standing)
-                return self._finish_handled(ctrl_data, buttons)
             self._source_reset()
             self._source_play(True)
             self.real_state = "TRACKING"
@@ -305,19 +384,6 @@ class UfoM0Pipeline(RlPipeline):
                 self.real_state = "STANDING"
                 logger.info("UFO M0 Real returned to standing pose")
             return self._finish_handled(ctrl_data, buttons)
-
-        if source is not None:
-            if self.real_state == "ENABLED" and self._latent_ctrl().cfg_ctrl.source == "socket":
-                self.env.step(standing)
-                return self._finish_handled(ctrl_data, buttons)
-            if self.real_state == "TRACKING" and source["ended"]:
-                self._begin_return()
-                return self._finish_handled(ctrl_data, buttons)
-            if self.real_state == "TRACKING" and not source["valid"]:
-                self._enter_stop("video latent source stale or invalid", fault=True)
-                if self._has_actuated:
-                    self._send_hold()
-                return self._finish_handled(ctrl_data, buttons)
 
         self._previous_buttons = buttons
         return False
@@ -343,6 +409,13 @@ class UfoM0Pipeline(RlPipeline):
                 raise
         finally:
             self._dry_run_cycle = False
+
+    def before_env_step(self, env_data, ctrl_data, extras, pd_target):
+        if not (self._real_mode and self._video_mode and self.real_state == "TRACKING"):
+            return
+        captured = ctrl_data["LatentCtrl"].get("capture_time")
+        if captured is None or time.monotonic() - captured > 5.0:
+            raise ValueError("Video latent exceeded 5 seconds before actuation")
 
     def safety_check(self):
         if not self._real_mode:
