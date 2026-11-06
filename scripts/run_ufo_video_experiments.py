@@ -80,8 +80,17 @@ def main():
                 ids = np.load(target / "latents/frame_id.npy", allow_pickle=False)
                 reference = np.load(Path(args.offline) / variant / "z.npy", allow_pickle=False)
                 aligned = ids < len(reference)
-                report[variant]["stream_vs_offline_mse"] = float(np.mean((candidate[aligned] - reference[ids[aligned]]) ** 2))
-                report[variant]["stream_vs_offline_cosine"] = float(np.mean(np.sum(candidate[aligned] * reference[ids[aligned]], axis=1) / 256))
+                if np.any(aligned):
+                    report[variant]["stream_vs_offline_mse"] = float(np.mean(
+                        (candidate[aligned] - reference[ids[aligned]]) ** 2))
+                    report[variant]["stream_vs_offline_cosine"] = float(np.mean(
+                        np.sum(candidate[aligned] * reference[ids[aligned]], axis=1) / 256))
+                    if variant == "original" and (target / "latents/s.npz").exists():
+                        with np.load(target / "latents/s.npz", allow_pickle=False) as online, \
+                             np.load(Path(args.offline) / variant / "s.npz", allow_pickle=False) as offline:
+                            for name in ("dof", "root_trans"):
+                                report[variant][f"stream_vs_offline_{name}_mse"] = float(np.mean(
+                                    (online[name][aligned] - offline[name][ids[aligned]]) ** 2))
         except Exception as exc:
             report[variant] = {"error": str(exc), "wall_seconds": time.monotonic() - started}
         finally:

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import secrets
 import socket
 import sys
 import time
@@ -30,11 +31,14 @@ def main():
         raise ValueError("Invalid saved latent sequence")
     delays = []
     start = time.monotonic()
+    session_id = secrets.randbits(64)
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
         for index, (latent, timestamp) in enumerate(zip(z, times)):
             due = start + float(timestamp - times[0])
             time.sleep(max(0.0, due - time.monotonic()))
-            sock.sendto(encode_packet(args.variant, index, due, latent, eof=index == len(z) - 1), args.socket)
+            sock.sendto(encode_packet(args.variant, index, due, latent,
+                                      eof=index == len(z) - 1, session_id=session_id,
+                                      sample_time=float(timestamp - times[0])), args.socket)
             delays.append(time.monotonic() - due)
     if args.metrics_json:
         Path(args.metrics_json).write_text(json.dumps({

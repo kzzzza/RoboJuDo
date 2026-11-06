@@ -37,7 +37,7 @@ done
   --output "$EXP_DIR/stream" --device cuda:0
 ```
 
-脚本依次启动原始、TCN、MLP 的视觉进程和 MuJoCo 控制进程。总览见 `$EXP_DIR/stream/summary.json`；各组的 `worker.json`、`control.json` 和日志位于同名子目录。流式算法使用滚动窗口，其 `z` 与步骤 1 的完整离线结果不能视为相同算法输出。
+脚本依次启动原始、TCN、MLP 的视觉进程和 MuJoCo 控制进程。总览见 `$EXP_DIR/stream/summary.json`；各组的 `worker.json`、`control.json` 和日志位于同名子目录。20 FPS 等非 30 FPS 输入也会按源时间戳因果采样到 30 Hz。视觉进程使用 50 帧窗口、4 帧更新；Original 额外保留 32 帧右侧等待，并每累计至少 12 个可提交帧运行一次后处理。长视频推理落后时会跳过旧图像，因此流式 `z` 不会与完整离线输出逐帧相同；报告按逻辑帧号给出对齐误差。
 
 ## 可选：仅诊断潜变量传输与控制延时
 
@@ -58,8 +58,10 @@ done
 
 脚本同时打开 `Camera RGB` 和 MuJoCo 窗口。摄像头画面经视觉模型生成 UFO 的 `z`，再由同一个 `LatentCtrl` 和 `UfoM0Policy` 控制仿真机器人。按摄像头窗口中的 `q` 或 `Esc`，或者在终端按 `Ctrl+C` 退出。可将 `tcn` 改为 `mlp` 或 `original`；每次运行的日志与指标保存在 `.local/camera_demo/run_*/`。如果使用普通 UVC 摄像头，添加 `--camera-backend opencv --camera 0`。
 
+摄像头检测不到人时，视觉进程立即通知 MuJoCo 停止使用旧 `z`，机器人用约 5 秒回到默认站姿并保持。人物重新入画且视觉窗口重新产生有效 `z` 后，仿真自动恢复跟随。通信中断或数据过期仍按原有故障处理，不当作人物离开。
+
 需要在 RGB 窗口查看人物检测框时，添加 `--show-detection-box`；默认不绘制。框来自当前控制链路使用的人物检测结果。
 
-此演示配置允许视觉推理延迟较大，用于观察模型动作效果；真机视频使用独立的 5 秒数据年龄限制。
+摄像头演示和真机视频现在都使用 5 秒数据年龄限制。`vision_metrics.json` 记录首次输出等待、取帧丢弃、各阶段耗时和采集到发送的延时；仿真 `control_metrics.json` 记录采集到 PD 目标的延时。超过 5 秒时停止策略输出。
 
 G1 双机摄像头真机测试命令及遥控器操作见 [UFO 视频真机部署](ufo_video_real.md)。

@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from collections import deque
 
 import numpy as np
 
@@ -38,7 +39,7 @@ class UfoM0Pipeline(RlPipeline):
 
     def reset(self):
         super().reset()
-        self.video_metrics = []
+        self.video_metrics = deque(maxlen=4096)
         if self._video_mode:
             self._latent_ctrl().set_playing(not self._real_mode)
         if self._real_mode:
@@ -61,6 +62,8 @@ class UfoM0Pipeline(RlPipeline):
                 self._video_seen = False
                 self._video_sim_return_step = 0
                 self._video_sim_return_start = None
+                self._video_sim_return_reason = None
+                self._video_sim_waiting_person = False
                 self.video_sim_done = False
             else:
                 motion = self.policy.policy.motion
@@ -93,8 +96,19 @@ class UfoM0Pipeline(RlPipeline):
             self.timestep += 1
             return True
         source = ctrl_data["LatentCtrl"]
-        if source["ended"] and self._video_sim_return_start is None:
+        if self._video_sim_waiting_person:
+            if source["valid"] and not source.get("person_lost", False) and not source["ended"]:
+                self.policy.reset()
+                self._source_play(True)
+                self._video_sim_waiting_person = False
+            self.env.step(np.asarray(self.env.dof_cfg.default_pos, dtype=np.float32))
+            self.timestep += 1
+            return True
+        should_return = (source["ended"] or
+                         (self._video_seen and source.get("person_lost", False)))
+        if should_return and self._video_sim_return_start is None:
             self._video_sim_return_start = np.asarray(self.env.dof_pos, dtype=np.float32).copy()
+            self._video_sim_return_reason = "person_lost" if source.get("person_lost", False) else "ended"
             self._source_play(False)
         if self._video_sim_return_start is not None:
             self._video_sim_return_step += 1
@@ -103,7 +117,11 @@ class UfoM0Pipeline(RlPipeline):
             standing = np.asarray(self.env.dof_cfg.default_pos, dtype=np.float32)
             self.env.step((1 - alpha) * self._video_sim_return_start + alpha * standing)
             if self._video_sim_return_step >= total:
-                self.video_sim_done = True
+                if self._video_sim_return_reason == "person_lost":
+                    self._video_sim_waiting_person = True
+                else:
+                    self.video_sim_done = True
+                self._video_sim_return_start = None
             self.timestep += 1
             return True
         if not source["valid"]:
@@ -128,6 +146,11 @@ class UfoM0Pipeline(RlPipeline):
             self.video_metrics.append({
                 "step": self.timestep, "latent_frame": int(source["frame_id"]),
                 "capture_to_pd_s": age,
+                "produce_to_pd_s": (None if source.get("produced_time") is None else
+                                    max(0.0, time.monotonic() - source["produced_time"])),
+                "sample_time_s": source.get("sample_time"),
+                "source_frame_id": source.get("source_frame_id"),
+                "session_id": source.get("session_id"),
                 "base_height_m": float(self.env.data.qpos[2]),
                 "base_tilt_rad": tilt,
             })
@@ -270,6 +293,10 @@ class UfoM0Pipeline(RlPipeline):
 
         if self.real_state == "TRACKING":
             if self._pressed(buttons, "X") or source["ended"]:
+                self._begin_return()
+                return self._finish_handled(ctrl_data, buttons)
+            if source.get("person_lost", False):
+                logger.warning("UFO video Real person lost; returning to standing pose")
                 self._begin_return()
                 return self._finish_handled(ctrl_data, buttons)
             if not source["valid"]:
@@ -416,6 +443,16 @@ class UfoM0Pipeline(RlPipeline):
         captured = ctrl_data["LatentCtrl"].get("capture_time")
         if captured is None or time.monotonic() - captured > 5.0:
             raise ValueError("Video latent exceeded 5 seconds before actuation")
+        source = ctrl_data["LatentCtrl"]
+        produced = source.get("produced_time")
+        self.video_metrics.append({
+            "step": self.timestep, "latent_frame": int(source.get("frame_id", -1)),
+            "capture_to_pd_s": max(0.0, time.monotonic() - captured),
+            "produce_to_pd_s": None if produced is None else max(0.0, time.monotonic() - produced),
+            "sample_time_s": source.get("sample_time"),
+            "source_frame_id": source.get("source_frame_id"),
+            "session_id": source.get("session_id"),
+        })
 
     def safety_check(self):
         if not self._real_mode:

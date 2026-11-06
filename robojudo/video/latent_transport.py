@@ -52,6 +52,7 @@ class LatestTcpSender:
         self.stop_event = threading.Event()
         self.changed = threading.Condition()
         self.latest = None
+        self.pending_person_loss = None
         self.generation = 0
         self.sent = 0
         self.thread = threading.Thread(target=self._run, name="LatentTcpSender", daemon=True)
@@ -63,6 +64,8 @@ class LatestTcpSender:
         with self.changed:
             self.latest = packet
             self.generation += 1
+            if decode_packet(packet).person_lost:
+                self.pending_person_loss = (self.generation, packet)
             self.changed.notify()
 
     def _run(self):
@@ -89,6 +92,16 @@ class LatestTcpSender:
                                 self.changed.wait(timeout=0.1)
                             packet = self.latest
                             generation = self.generation
+                            person_loss = self.pending_person_loss
+                        if person_loss is not None:
+                            loss_generation, loss_packet = person_loss
+                            sock.sendall(loss_packet)
+                            self.sent += 1
+                            with self.changed:
+                                if self.pending_person_loss == person_loss:
+                                    self.pending_person_loss = None
+                            if loss_generation == generation:
+                                last_sent = generation
                         if packet is None or generation == last_sent:
                             continue
                         sock.sendall(packet)
@@ -115,6 +128,7 @@ class LatestTcpReceiver:
     def __init__(self, port: int):
         self.stop_event = threading.Event()
         self.items = queue.Queue(maxsize=1)
+        self.person_loss_items = queue.Queue(maxsize=1)
         self._link_lock = threading.Lock()
         self._connected = False
         self._disconnected_at = None
@@ -133,11 +147,12 @@ class LatestTcpReceiver:
         self.thread.start()
 
     def _publish(self, item):
+        target = self.person_loss_items if item[1].person_lost else self.items
         try:
-            self.items.put_nowait(item)
+            target.put_nowait(item)
         except queue.Full:
-            self.items.get_nowait()
-            self.items.put_nowait(item)
+            target.get_nowait()
+            target.put_nowait(item)
 
     def _run(self):
         session = 0
@@ -170,22 +185,29 @@ class LatestTcpReceiver:
                         self._active_session = session
                     logger.info("Latent TCP session ready; clock uncertainty %.1f ms", error * 1000)
                     last_sequence = -1
+                    last_source_session = None
                     began = time.monotonic()
                     while not self.stop_event.is_set() and time.monotonic() - began < SESSION_SECONDS:
                         packet = _read_exact(conn, PACKET_BYTES, self.stop_event)
                         try:
-                            variant, sequence, captured, z, eof = decode_packet(packet)
+                            item = decode_packet(packet)
                         except ValueError:
                             continue
-                        if sequence <= last_sequence:
+                        if (item.sequence <= last_sequence and item.session_id == last_source_session
+                                and not (item.eof and item.sequence == last_sequence)):
                             continue
-                        last_sequence = sequence
+                        if item.session_id != last_source_session:
+                            last_source_session = item.session_id
+                            last_sequence = -1
+                        last_sequence = item.sequence
                         # Conservative age: include clock-calibration uncertainty.
-                        local_capture = captured - offset - error
+                        local_capture = item.capture_time - offset - error
+                        local_produced = item.produced_time - offset - error
                         received_at = time.monotonic()
                         if local_capture > received_at + MAX_CLOCK_ERROR:
                             continue
-                        self._publish((session, variant, sequence, local_capture, received_at, z, eof))
+                        self._publish((session, item._replace(capture_time=local_capture,
+                                                               produced_time=local_produced), received_at))
             except (OSError, ConnectionError, ValueError) as exc:
                 logger.debug("Latent TCP receiver disconnected: %s", exc)
             finally:
@@ -195,6 +217,10 @@ class LatestTcpReceiver:
                         self._disconnected_at = time.monotonic()
 
     def get_latest(self):
+        try:
+            return self.person_loss_items.get_nowait()
+        except queue.Empty:
+            pass
         try:
             return self.items.get_nowait()
         except queue.Empty:

@@ -57,6 +57,23 @@ class LatentCtrlTests(unittest.TestCase):
             self.assertEqual(data["frame_id"], 2)
             self.assertTrue(data["valid"])
             self.assertEqual(decode_packet(encode_packet("mlp", 2, time.monotonic(), z))[0], "mlp")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+                sender.sendto(encode_packet("mlp", 0, time.monotonic(), z,
+                                            session_id=99), path)
+            restarted = ctrl.get_data()
+            self.assertEqual(restarted["frame_id"], 0)
+            self.assertEqual(restarted["session_id"], 99)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+                sender.sendto(encode_packet("mlp", 1, time.monotonic(), np.zeros(256, np.float32),
+                                            session_id=99, person_lost=True), path)
+                sender.sendto(encode_packet("mlp", 0, time.monotonic(), z,
+                                            session_id=100), path)
+            lost = ctrl.get_data()
+            self.assertTrue(lost["person_lost"])
+            self.assertFalse(lost["valid"])
+            recovered = ctrl.get_data()
+            self.assertFalse(recovered["person_lost"])
+            self.assertTrue(recovered["valid"])
             time.sleep(0.03)
             self.assertFalse(ctrl.get_data()["valid"])
             ctrl.shutdown()
@@ -64,6 +81,33 @@ class LatentCtrlTests(unittest.TestCase):
 
 
 class RealVideoStateTests(unittest.TestCase):
+    def test_sim_person_loss_returns_to_standing_then_accepts_new_latent(self):
+        pipeline = fake_pipeline()
+        pipeline._real_mode = False
+        pipeline._video_mode = True
+        pipeline.freq = 2
+        pipeline.video_sim_done = False
+        pipeline._video_seen = True
+        pipeline._video_sim_return_start = None
+        pipeline._video_sim_return_step = 0
+        pipeline._video_sim_return_reason = None
+        pipeline._video_sim_waiting_person = False
+        latent = SimpleNamespace(set_playing=lambda _: None)
+        pipeline.ctrl_manager.controllers = {"LatentCtrl": SimpleNamespace(inst=latent)}
+        lost = {"LatentCtrl": {"valid": False, "ended": False, "person_lost": True}}
+        for _ in range(int(pipeline.RETURN_SECONDS * pipeline.freq)):
+            self.assertTrue(pipeline._video_sim_step(lost, False))
+        self.assertTrue(pipeline._video_sim_waiting_person)
+        np.testing.assert_allclose(pipeline.env.targets[-1], pipeline.env.dof_cfg.default_pos)
+        fresh = {"LatentCtrl": {"valid": True, "ended": False, "person_lost": False}}
+        self.assertTrue(pipeline._video_sim_step(fresh, False))
+        self.assertEqual(pipeline.policy.reset_count, 1)
+        self.assertFalse(pipeline._video_sim_step(fresh, False))
+        ended = {"LatentCtrl": {"valid": True, "ended": True, "person_lost": False}}
+        for _ in range(int(pipeline.RETURN_SECONDS * pipeline.freq)):
+            self.assertTrue(pipeline._video_sim_step(ended, False))
+        self.assertTrue(pipeline.video_sim_done)
+
     def test_real_video_requires_explicit_robot_gate_before_environment_creation(self):
         cfg = ConfigManager("g1_ufo_video_real_stream").get_cfg()
         with patch.dict(os.environ, {"UFO_REAL_ROBOT_OK": ""}):

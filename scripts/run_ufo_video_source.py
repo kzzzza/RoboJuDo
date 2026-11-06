@@ -11,7 +11,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--video", help="30 FPS MP4 replayed using presentation timestamps")
+    source.add_argument("--video", help="MP4 replayed using presentation timestamps and sampled to 30 Hz")
     source.add_argument("--camera", type=int, help="Camera index")
     parser.add_argument("--camera-backend", choices=("opencv", "k4a"), default="opencv")
     parser.add_argument("--show-camera", action="store_true", help="Open an RGB preview; q/Esc closes it")

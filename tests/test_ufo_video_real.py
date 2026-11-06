@@ -61,6 +61,18 @@ class TcpLatentTests(unittest.TestCase):
                 self.assertFalse(ctrl.get_data()["valid"])
                 sender.send(encode_packet("tcn", 5, time.monotonic(), z))
                 self.assertTrue(_wait_for(lambda: ctrl.get_data()["valid"]))
+                sender.send(encode_packet("tcn", 0, time.monotonic(), z, session_id=42))
+                self.assertTrue(_wait_for(lambda: ctrl.get_data()["session_id"] == 42))
+                self.assertEqual(ctrl.get_data()["frame_id"], 0)
+                sender.send(encode_packet("tcn", 1, time.monotonic(), np.zeros(256, np.float32),
+                                          session_id=42, person_lost=True))
+                # A fast reappearance must not overwrite the safety transition.
+                sender.send(encode_packet("tcn", 0, time.monotonic(), z, session_id=43))
+                lost = _wait_for(lambda: (data if (data := ctrl.get_data())["person_lost"] else None))
+                self.assertFalse(lost["valid"])
+                self.assertTrue(_wait_for(lambda: ctrl.get_data()["session_id"] == 43))
+                self.assertTrue(ctrl.get_data()["valid"])
+                self.assertFalse(ctrl.get_data()["person_lost"])
                 sender.close()
                 _wait_for(lambda: not ctrl.tcp_receiver.link_ready())
                 self.assertFalse(ctrl.get_data()["valid"])
@@ -71,10 +83,11 @@ class TcpLatentTests(unittest.TestCase):
 
 
 class VideoRealStateTests(unittest.TestCase):
-    def _cycle(self, pipeline, *, valid=True, **buttons):
+    def _cycle(self, pipeline, *, valid=True, person_lost=False, **buttons):
         state = {name: bool(buttons.get(name, False)) for name in pipeline.BUTTONS}
         ctrl_data = Box({"UnitreeCtrl": {"buttons": state},
-                         "LatentCtrl": {"valid": valid, "ended": False}, "COMMANDS": []})
+                         "LatentCtrl": {"valid": valid, "ended": False,
+                                        "person_lost": person_lost}, "COMMANDS": []})
         feedback = Box({"dof_pos": pipeline.env.dof_pos, "dof_vel": np.zeros(29),
                         "base_quat": pipeline.env.base_quat, "base_ang_vel": np.zeros(3)})
         return pipeline.pre_policy_step(feedback, ctrl_data)
@@ -111,6 +124,27 @@ class VideoRealStateTests(unittest.TestCase):
             self._cycle(pipeline)
         self.assertEqual(pipeline.real_state, "STANDING")
 
+    def test_person_loss_returns_to_standing_and_requires_new_b_press(self):
+        pipeline = fake_pipeline()
+        pipeline._video_mode = True
+        latent = SimpleNamespace(cfg_ctrl=SimpleNamespace(source="tcp"), ended=False,
+                                 set_playing=lambda _: None, reset=lambda: None)
+        pipeline.ctrl_manager.controllers = {"LatentCtrl": SimpleNamespace(inst=latent)}
+        pipeline.real_state = "TRACKING"
+        pipeline._has_actuated = True
+        self.assertTrue(self._cycle(pipeline, valid=False, person_lost=True))
+        self.assertEqual(pipeline.real_state, "RETURNING")
+        self.assertFalse(pipeline.policy.tracking_enabled)
+        for _ in range(int(pipeline.RETURN_SECONDS * pipeline.freq)):
+            self._cycle(pipeline, valid=False, person_lost=True)
+        self.assertEqual(pipeline.real_state, "STANDING")
+        np.testing.assert_allclose(pipeline.env.targets[-1], pipeline.env.dof_cfg.default_pos)
+        self.assertTrue(self._cycle(pipeline, valid=False, person_lost=True, B=True))
+        self.assertEqual(pipeline.real_state, "STANDING")
+        self._cycle(pipeline, valid=True)
+        self.assertFalse(self._cycle(pipeline, valid=True, B=True))
+        self.assertEqual(pipeline.real_state, "TRACKING")
+
     def test_auto_debug_failure_precedes_driver_construction(self):
         cfg = SimpleNamespace(env=SimpleNamespace(is_sim=False,
                                                   unitree=SimpleNamespace(net_if="eth0")),
@@ -128,6 +162,7 @@ class VideoRealStateTests(unittest.TestCase):
         pipeline = fake_pipeline()
         pipeline._video_mode = True
         pipeline.real_state = "TRACKING"
+        pipeline.video_metrics = []
         ctrl_data = {"LatentCtrl": {"capture_time": time.monotonic() - 6.0}}
         with self.assertRaisesRegex(ValueError, "exceeded 5 seconds"):
             pipeline.before_env_step(None, ctrl_data, {}, np.zeros(29))

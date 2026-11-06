@@ -51,8 +51,9 @@
 
 ## UFO M0 视频潜变量输入
 
-- `g1_ufo_video_file`、`g1_ufo_video_stream` 和对应的 `_real_` 配置复用 `UfoM0Pipeline`、`UfoM0Policy` 与现有真机保护。唯一 `LatentCtrl` 支持离线 `z.npy`/时间戳和本机 Unix socket 两种来源；Actor 仍需要机器人反馈与四帧历史。
+- `g1_ufo_video_file`、`g1_ufo_video_stream` 和对应的 `_real_` 配置复用 `UfoM0Pipeline`、`UfoM0Policy` 与现有真机保护。唯一 `LatentCtrl` 支持离线 `z.npy`/时间戳、本机 Unix socket 和 SSH 转发的 TCP；Actor 仍需要机器人反馈与四帧历史。
 - `robojudo/video/` 的视觉前端在独立进程运行，负责检测、HMR2、TCAM 和原始/TCN/MLP `u→z`；50 Hz 控制进程只消费 `float32[256]`、帧号和采集时间。完整视频算法和 50 帧滚动窗口流式算法不同，实验结果不可混称。模型包及实验输出留在 Git 忽略的 `.local/`，视觉依赖在 `.venv-video/`，具体命令见 `docs/ufo_video.md`。
-- 本机完整视觉流式进程处理 46.9 秒视频需 101–141 秒，先前的 2 秒限制未通过。视频真机配置现按用户批准使用 5 秒数据年龄上限；这不代表 SSH 链路与 Jetson 真机周期已通过实测。不要将 transport 模式的预计算 `z` 回放当成实时视觉通过。
-- 桌面摄像头演示使用 `scripts/run_ufo_camera_demo.py --variant tcn`，同时打开 RGB 与 MuJoCo 窗口；Azure Kinect 经 `robojudo/video/azure_kinect.py` 的 libk4a 读取。演示专用配置 `g1_ufo_video_camera` 放宽潜变量时效以观察动作，不能据此判断真机延迟合格。
+- 视频流式视觉进程使用有界最新图像队列、30 Hz 因果时间轴、50 帧 TCAM 窗口和尾部更新；Original 在 120 帧滚动片段内保留 32 帧后处理右侧等待，TCN 保留 14 帧历史，MLP 逐帧映射。完整离线算法不变，流式 Original 是有界近似。视频真机配置使用 5 秒数据年龄上限；这不代表 SSH 链路与 Jetson 真机周期已通过实测。不要将 transport 模式的预计算 `z` 回放当成实时视觉通过。
+- 桌面摄像头演示使用 `scripts/run_ufo_camera_demo.py --variant tcn`，同时打开 RGB 与 MuJoCo 窗口；Azure Kinect 经 `robojudo/video/azure_kinect.py` 的 libk4a 读取。`g1_ufo_video_camera` 与真机配置使用相同的 5 秒数据年龄限制，但桌面效果不能据此判断真机延迟合格。
 - 真机摄像头链路由 GPU 主机通过 SSH 转发 `z` 到 Jetson 本机 TCP 端口；`LatentCtrl` 后台接收并校准跨主机单调时钟，控制循环继续复用 UFO Actor 和已测试的 `UnitreeCppEnv`。`g1_ufo_video_real_stream` 启动前自动用官方 SDK 释放自带运动服务；A 站姿、B 跟随、R2 软件停止并保持，操作见 `docs/ufo_video_real.md`。
+- 实时摄像头检测不到人时，视觉进程用潜变量协议的 `person_lost` 状态立即清除旧 `z` 与时序缓存。Sim 和 Real 跟随状态都用约 5 秒回默认站姿；Sim 在新有效 `z` 到达后自动恢复，Real 保持站姿并要求重新按 B。通信超时仍按故障处理，不视作正常人物离开。

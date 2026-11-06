@@ -20,16 +20,16 @@ class g1_ufo_video_file(RlPipelineCfg):
 
 @cfg_registry.register
 class g1_ufo_video_stream(g1_ufo_video_file):
-    ctrl: list = [LatentCtrlCfg(source="socket", stale_seconds=0.75)]
+    ctrl: list = [LatentCtrlCfg(source="socket", stale_seconds=5.0, max_age_seconds=5.0)]
     run_fullspeed: bool = False
 
 
 @cfg_registry.register
 class g1_ufo_video_camera(g1_ufo_video_stream):
-    """Live camera demo: show the robot and allow delayed RGB inference."""
+    """Live camera demo with the same latent age limit as G1 Real."""
 
     env: G1UfoM0MujocoEnvCfg = G1UfoM0MujocoEnvCfg(render=True)
-    ctrl: list = [LatentCtrlCfg(source="socket", stale_seconds=30.0, max_age_seconds=300.0)]
+    ctrl: list = [LatentCtrlCfg(source="socket", stale_seconds=5.0, max_age_seconds=5.0)]
 
 
 @cfg_registry.register

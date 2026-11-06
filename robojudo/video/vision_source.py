@@ -1,6 +1,7 @@
 """Timestamped 30 Hz frames for the separate UFO vision process."""
 
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,17 +11,72 @@ class Frame:
     index: int
     rgb: object
     captured_at: float  # monotonic clock shared with the local control process
+    source_time: float | None = None  # seconds on the source timeline
+
+
+class LatestFrameSource:
+    """Read the camera/video independently of inference, retaining one frame."""
+
+    def __init__(self, source):
+        self.source = source
+        self.changed = threading.Condition()
+        self.latest = None
+        self.finished = False
+        self.error = None
+        self.dropped = 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._read, name="VisionCapture", daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        try:
+            for frame in self.source:
+                if self.stop.is_set():
+                    break
+                with self.changed:
+                    if self.latest is not None:
+                        self.dropped += 1
+                    self.latest = frame
+                    self.changed.notify()
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            try:
+                self.source.close()
+            finally:
+                with self.changed:
+                    self.finished = True
+                    self.changed.notify_all()
+
+    def __iter__(self):
+        while True:
+            with self.changed:
+                while self.latest is None and not self.finished:
+                    self.changed.wait(timeout=0.2)
+                frame = self.latest
+                self.latest = None
+                finished = self.finished
+            if frame is not None:
+                yield frame
+            elif finished:
+                if self.error is not None:
+                    raise self.error
+                return
+
+    def close(self):
+        self.stop.set()
+        self.thread.join(timeout=2.0)
 
 
 def replay_video(path: str | Path):
-    """Replay presentation timestamps, preserving lateness for latency measurement."""
+    """Replay source PTS; the worker causally maps frames onto a 30 Hz grid."""
     import av
 
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
-        rate = float(stream.average_rate)
-        if abs(rate - 30.0) > 0.02:
-            raise ValueError(f"Stream replay needs a 30 FPS input; got {rate:.3f}")
+        rate = float(stream.average_rate) if stream.average_rate else 0.0
+        if rate <= 0:
+            raise ValueError("Video has no valid frame rate")
         start = time.monotonic()
         first_pts = None
         last_pts = -1.0
@@ -38,7 +94,7 @@ def replay_video(path: str | Path):
             delay = due - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
-            yield Frame(index, decoded.to_ndarray(format="rgb24"), due)
+            yield Frame(index, decoded.to_ndarray(format="rgb24"), due, pts)
 
 
 def camera_frames(device: int = 0, *, backend: str = "opencv"):
@@ -74,9 +130,12 @@ def camera_frames(device: int = 0, *, backend: str = "opencv"):
 
     try:
         index = 0
+        first_time = None
         while True:
             rgb, captured_at = read()
-            yield Frame(index, rgb, captured_at)
+            if first_time is None:
+                first_time = captured_at
+            yield Frame(index, rgb, captured_at, captured_at - first_time)
             index += 1
     finally:
         close()

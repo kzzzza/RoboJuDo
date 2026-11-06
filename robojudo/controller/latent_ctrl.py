@@ -23,11 +23,16 @@ class LatentCtrl(Controller):
         self.socket = None
         self.tcp_receiver = None
         self.tcp_session = -1
+        self.source_session = None
         self.z = None
         self.frame_id = -1
+        self.source_frame_id = -1
+        self.sample_time = None
         self.capture_time = None
+        self.produced_time = None
         self.received_time = None
         self.ended = False
+        self.person_lost = False
         self.playing = bool(env is not None and env.cfg_env.is_sim)
         self.play_time = 0.0
         if cfg_ctrl.source == "file":
@@ -65,13 +70,18 @@ class LatentCtrl(Controller):
     def reset(self):
         self.play_time = 0.0
         self.ended = False
+        self.person_lost = False
         if self.zs is not None:
             self.frame_id = 0
             self.z = self.zs[0].copy()
         else:
             self.frame_id = -1
+            self.source_session = None
+            self.source_frame_id = -1
+            self.sample_time = None
             self.z = None
             self.capture_time = None
+            self.produced_time = None
             self.received_time = None
 
     def set_playing(self, enabled: bool):
@@ -84,45 +94,97 @@ class LatentCtrl(Controller):
             except BlockingIOError:
                 break
             try:
-                variant, sequence, capture_time, z, eof = decode_packet(packet)
+                item = decode_packet(packet)
             except ValueError:
                 continue
-            if variant != self.cfg_ctrl.variant or sequence <= self.frame_id:
+            if item.variant != self.cfg_ctrl.variant:
                 continue
-            if not np.isclose(np.linalg.norm(z), 16.0, atol=1e-3):
+            if item.session_id != self.source_session:
+                self.source_session = item.session_id
+                self.frame_id = -1
+                self.z = None
+                self.person_lost = False
+            if item.sequence <= self.frame_id:
+                if item.eof and item.sequence == self.frame_id:
+                    self.ended = True
                 continue
-            self.z = z
-            self.frame_id = sequence
-            self.capture_time = capture_time
+            if item.person_lost:
+                self.z = None
+                self.frame_id = item.sequence
+                self.source_frame_id = item.source_frame_id
+                self.sample_time = item.sample_time
+                self.capture_time = item.capture_time
+                self.produced_time = item.produced_time
+                self.received_time = time.monotonic()
+                self.ended = False
+                self.person_lost = True
+                # Deliver this state transition before a newer z in the socket.
+                return
+            if not np.isclose(np.linalg.norm(item.z), 16.0, atol=1e-3):
+                continue
+            self.z = item.z
+            self.person_lost = False
+            self.frame_id = item.sequence
+            self.source_frame_id = item.source_frame_id
+            self.sample_time = item.sample_time
+            self.capture_time = item.capture_time
+            self.produced_time = item.produced_time
             self.received_time = time.monotonic()
-            self.ended = eof
+            self.ended = item.eof
 
     def _poll_tcp(self):
         active_session = self.tcp_receiver.active_session()
         if active_session != self.tcp_session:
             self.tcp_session = active_session
             self.frame_id = -1
+            self.source_session = None
+            self.source_frame_id = -1
+            self.sample_time = None
             self.z = None
             self.capture_time = None
+            self.produced_time = None
             self.received_time = None
             self.ended = False
+            self.person_lost = False
         latest = self.tcp_receiver.get_latest()
         if latest is None:
             return
-        session, variant, sequence, capture_time, received_time, z, eof = latest
+        session, item, received_time = latest
         if session != active_session:
             return
-        if sequence <= self.frame_id:
-            return
-        if variant != self.cfg_ctrl.variant or not np.isclose(np.linalg.norm(z), 16.0, atol=1e-3):
+        if item.session_id != self.source_session:
+            self.source_session = item.session_id
+            self.frame_id = -1
             self.z = None
-            self.frame_id = sequence
+            self.person_lost = False
+        if item.sequence <= self.frame_id:
+            if item.eof and item.sequence == self.frame_id:
+                self.ended = True
             return
-        self.z = z
-        self.frame_id = sequence
-        self.capture_time = capture_time
+        if item.person_lost and item.variant == self.cfg_ctrl.variant:
+            self.z = None
+            self.frame_id = item.sequence
+            self.source_frame_id = item.source_frame_id
+            self.sample_time = item.sample_time
+            self.capture_time = item.capture_time
+            self.produced_time = item.produced_time
+            self.received_time = received_time
+            self.ended = False
+            self.person_lost = True
+            return
+        if item.variant != self.cfg_ctrl.variant or not np.isclose(np.linalg.norm(item.z), 16.0, atol=1e-3):
+            self.z = None
+            self.frame_id = item.sequence
+            return
+        self.z = item.z
+        self.person_lost = False
+        self.frame_id = item.sequence
+        self.source_frame_id = item.source_frame_id
+        self.sample_time = item.sample_time
+        self.capture_time = item.capture_time
+        self.produced_time = item.produced_time
         self.received_time = received_time
-        self.ended = eof
+        self.ended = item.eof
 
     def get_data(self):
         if self.zs is not None:
@@ -131,7 +193,10 @@ class LatentCtrl(Controller):
             self.z = self.zs[self.frame_id].copy()
             self.ended = self.play_time > float(self.timestamps[-1]) + self.cfg_ctrl.control_dt * 0.5
             return {"z": self.z, "valid": True, "ended": self.ended,
-                    "frame_id": self.frame_id, "age": 0.0, "capture_time": None}
+                    "person_lost": False,
+                    "frame_id": self.frame_id, "age": 0.0, "capture_time": None,
+                    "produced_time": None, "sample_time": float(self.timestamps[self.frame_id]),
+                    "source_frame_id": self.frame_id, "session_id": None}
         if self.tcp_receiver is not None:
             self._poll_tcp()
         else:
@@ -143,7 +208,10 @@ class LatentCtrl(Controller):
         if self.tcp_receiver is not None:
             valid = valid and self.tcp_receiver.link_ready()
         return {"z": self.z.copy() if valid else None, "valid": valid, "ended": self.ended,
-                "frame_id": self.frame_id, "age": age, "capture_time": self.capture_time}
+                "person_lost": self.person_lost,
+                "frame_id": self.frame_id, "age": age, "capture_time": self.capture_time,
+                "produced_time": self.produced_time, "sample_time": self.sample_time,
+                "source_frame_id": self.source_frame_id, "session_id": self.source_session}
 
     def post_step_callback(self, commands=None):
         if self.zs is not None and self.playing and not self.ended:

@@ -110,14 +110,19 @@ def main():
     except KeyboardInterrupt:
         logger.info("Interrupted; finalizing simulation outputs")
     finally:
-        if args.metrics_json and getattr(pipeline, "_video_mode", False) and cfg.env.is_sim:
-            metrics = pipeline.video_metrics
+        if args.metrics_json and getattr(pipeline, "_video_mode", False):
+            metrics = list(pipeline.video_metrics)
             ages = np.asarray([row["capture_to_pd_s"] for row in metrics
                                if row["capture_to_pd_s"] is not None], dtype=np.float64)
-            heights = np.asarray([row["base_height_m"] for row in metrics], dtype=np.float64)
-            first_low = next((row["step"] for row in metrics if row["base_height_m"] < 0.45), None)
+            produced = np.asarray([row["produce_to_pd_s"] for row in metrics
+                                   if row["produce_to_pd_s"] is not None], dtype=np.float64)
+            heights = np.asarray([row["base_height_m"] for row in metrics
+                                  if "base_height_m" in row], dtype=np.float64)
+            first_low = next((row["step"] for row in metrics
+                              if row.get("base_height_m", float("inf")) < 0.45), None)
             first_fall = next((row["step"] for row in metrics
-                               if row["base_height_m"] < 0.45 and row["base_tilt_rad"] > 1.0), None)
+                               if row.get("base_height_m", float("inf")) < 0.45
+                               and row.get("base_tilt_rad", 0.0) > 1.0), None)
             report = {"config": args.config, "variant": args.latent_variant,
                       "steps": pipeline.timestep, "policy_steps": len(metrics),
                       "unique_latent_frames": len({row["latent_frame"] for row in metrics}),
@@ -125,6 +130,8 @@ def main():
                       "min_base_height_m": float(heights.min()) if len(heights) else None,
                       "capture_to_pd_p50_s": float(np.percentile(ages, 50)) if len(ages) else None,
                       "capture_to_pd_p95_s": float(np.percentile(ages, 95)) if len(ages) else None,
+                      "produce_to_pd_p50_s": float(np.percentile(produced, 50)) if len(produced) else None,
+                      "produce_to_pd_p95_s": float(np.percentile(produced, 95)) if len(produced) else None,
                       "samples": metrics}
             from pathlib import Path
             target = Path(args.metrics_json)
