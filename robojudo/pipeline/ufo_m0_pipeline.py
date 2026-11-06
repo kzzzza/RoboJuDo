@@ -44,6 +44,7 @@ class UfoM0Pipeline(RlPipeline):
             self._latent_ctrl().set_playing(not self._real_mode)
         if self._real_mode:
             self.real_state = "DISARMED"
+            self.stop_reason = None
             self._fault_stop = False
             self._released_after_stop = False
             self._has_actuated = False
@@ -182,6 +183,7 @@ class UfoM0Pipeline(RlPipeline):
     def _enter_stop(self, reason: str, *, fault: bool):
         if self.real_state != "STOPPED":
             logger.warning("UFO M0 Real stopped: %s", reason)
+            self.stop_reason = reason
         self.real_state = "STOPPED"
         self._fault_stop = self._fault_stop or fault
         self._released_after_stop = False

@@ -38,38 +38,50 @@ def check_artifacts(model_dir: Path, manifest_path: Path, names=None):
     return expected_files
 
 
-def check_host(net_if: str):
-    if importlib.util.find_spec("unitree_cpp") is None:
-        raise RuntimeError("unitree_cpp is unavailable")
+def check_host(net_if: str, driver="unitree_cpp"):
+    if importlib.util.find_spec(driver) is None:
+        raise RuntimeError(f"{driver} is unavailable")
     interfaces = {name for _, name in socket.if_nameindex()}
     if net_if not in interfaces:
         raise RuntimeError(f"Network interface {net_if!r} is unavailable")
     operstate = Path(f"/sys/class/net/{net_if}/operstate").read_text().strip()
-    if operstate != "up":
+    if operstate != "up" and not (net_if == "lo" and operstate == "unknown"):
         raise RuntimeError(f"Network interface {net_if!r} is {operstate}, expected up")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", choices=("g1_ufo_m0_real", "g1_ufo_video_real_file",
-                                             "g1_ufo_video_real_stream"), default="g1_ufo_m0_real")
+                                             "g1_ufo_video_real_stream", "g1_ufo_video_real_workstation"),
+                        default="g1_ufo_m0_real")
+    parser.add_argument("--net-if", help="Explicit workstation DDS interface")
     parser.add_argument("--motion-path", help="Override the configured LAFAN G1 motion")
     parser.add_argument("--latent-dir", help="Directory containing z.npy and timestamps.npy for video-file control")
     parser.add_argument("--latent-variant", choices=("original", "tcn", "mlp"), default="original")
     parser.add_argument("--offline", action="store_true", help="Skip host driver and network checks")
+    parser.add_argument("--read-only", action="store_true", help="Also receive G1 lowstate; never publish commands")
     args = parser.parse_args()
 
     cfg = ConfigManager(args.config).get_cfg()
-    if cfg.env.env_type != "UnitreeCppEnv" or cfg.env.dof.num_dofs != 29:
+    workstation = args.config == "g1_ufo_video_real_workstation"
+    if args.read_only and (args.offline or not workstation):
+        parser.error("--read-only requires the workstation config without --offline")
+    if args.net_if:
+        cfg.env.unitree.net_if = args.net_if
+    if workstation and not args.offline and not cfg.env.unitree.net_if:
+        parser.error("Workstation preflight requires --net-if")
+    expected_env = "UnitreeG1DdsEnv" if workstation else "UnitreeCppEnv"
+    if cfg.env.env_type != expected_env or cfg.env.dof.num_dofs != 29:
         raise ValueError("Unexpected UFO M0 Real environment configuration")
     model_dir = Path(cfg.policy.model_dir).expanduser()
-    video_stream = args.config == "g1_ufo_video_real_stream"
+    video_stream = args.config in ("g1_ufo_video_real_stream", "g1_ufo_video_real_workstation")
     actor_files = ("FBcprAuxModel.onnx", "FBcprAuxModel.meta.json")
     digests = check_artifacts(model_dir, MANIFEST, actor_files if video_stream else None)
     if video_stream:
         latent = next(ctrl for ctrl in cfg.ctrl if ctrl.ctrl_type == "LatentCtrl")
-        if not cfg.video_real_enabled or not cfg.auto_debug_mode or latent.source != "tcp":
-            raise ValueError("Video Real stream must use the guarded TCP and automatic debug-mode configuration")
+        expected_source = "socket" if workstation else "tcp"
+        if not cfg.video_real_enabled or not cfg.auto_debug_mode or latent.source != expected_source:
+            raise ValueError("Video Real stream has an unexpected transport or debug-mode configuration")
     metadata = json.loads((model_dir / "FBcprAuxModel.meta.json").read_text())
     if metadata["control_joint_names"] != cfg.env.dof.joint_names:
         raise ValueError("Model and real robot joint order differ")
@@ -132,9 +144,20 @@ def main():
         raise ValueError("Invalid actor output")
 
     if not args.offline:
-        check_host(cfg.env.unitree.net_if)
+        check_host(cfg.env.unitree.net_if, "unitree_sdk2py" if workstation else "unitree_cpp")
         if video_stream and importlib.util.find_spec("unitree_sdk2py") is None:
             raise RuntimeError("unitree_sdk2py is required for automatic G1 debug mode")
+    feedback = None
+    if args.read_only:
+        from robojudo.environment.utils.g1_dds import G1StateReader
+
+        reader = G1StateReader(cfg.env.unitree.net_if, feedback_timeout_s=cfg.env.feedback_timeout_s)
+        try:
+            state = reader.wait(cfg.env.connect_timeout_s)
+            feedback = {"tick": state.tick, "mode_machine": state.mode_machine,
+                        "joints": len(state.q), "remote_bytes": len(state.remote), **reader.metrics()}
+        finally:
+            reader.close()
     print(json.dumps({
         "status": "passed", "control_environment_created": False,
         "model_sha256": digests, "motion": str(motion.path) if motion is not None else None,
@@ -142,6 +165,7 @@ def main():
         "latent_source": cfg.policy.latent_source, "latent_variant": args.latent_variant if motion is None else None,
         "network_interface": cfg.env.unitree.net_if,
         "host_checks": not args.offline,
+        "feedback": feedback,
     }, indent=2))
 
 

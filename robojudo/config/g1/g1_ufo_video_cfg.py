@@ -4,7 +4,7 @@ from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import LatentCtrlCfg, UnitreeCtrlCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
-from .env.g1_ufo_m0_env_cfg import G1UfoM0MujocoEnvCfg, G1UfoM0RealEnvCfg
+from .env.g1_ufo_m0_env_cfg import G1UfoM0MujocoEnvCfg, G1UfoM0RealEnvCfg, G1UfoWorkstationEnvCfg
 from .policy.g1_ufo_m0_policy_cfg import G1UfoM0PolicyCfg
 
 
@@ -47,3 +47,10 @@ class g1_ufo_video_real_stream(g1_ufo_video_real_file):
     video_real_enabled: bool = True
     ctrl: list = [UnitreeCtrlCfg(triggers={}, combination_init_buttons=[]),
                   LatentCtrlCfg(source="tcp", stale_seconds=5.0, max_age_seconds=5.0)]
+
+
+@cfg_registry.register
+class g1_ufo_video_real_workstation(g1_ufo_video_real_stream):
+    env: G1UfoWorkstationEnvCfg = G1UfoWorkstationEnvCfg()
+    ctrl: list = [UnitreeCtrlCfg(triggers={}, combination_init_buttons=[]),
+                  LatentCtrlCfg(source="socket", stale_seconds=5.0, max_age_seconds=5.0)]

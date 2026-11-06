@@ -1,5 +1,7 @@
 # UFO 摄像头控制 G1：双机真机测试
 
+所有自定义模型均在工作站运行、通过有线或无线 DDS 直接控制 G1 的方案，见[工作站直连部署](ufo_video_workstation.md)。本文保留原来的 Jetson/SSH 部署流程。
+
 Jetson 的代码同步、Python 环境和驱动安装见 [端侧部署说明](ufo_video_jetson_setup.md)。
 
 GPU 主机运行摄像头与视觉模型，G1 Jetson 运行 RoboJuDo 50 Hz 控制。`z[256]` 经 SSH 隧道传输；Wi-Fi 或网线均可承载 SSH。两台机器使用同一代码版本，模型权重留在各自本地，不提交 Git。Jetson 只需 `assets/models/g1/ufo_m0/` 中的 Actor ONNX、元数据和哈希清单；GPU 主机需要 `.local/rgb_bfm/` 三套视觉模型包。按 [Unitree 安装说明](unitree_setup.md)在 Jetson 安装 `unitree_cpp` 和官方 `unitree_sdk2py`。

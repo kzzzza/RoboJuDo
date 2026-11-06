@@ -2,9 +2,11 @@
 
 from typing import Literal
 
+from pydantic import Field
+
 from robojudo.config import ASSETS_DIR
 from robojudo.config.g1.policy.g1_ufo_m0_policy_cfg import G1UfoM0DoF
-from robojudo.environment.env_cfgs import MujocoEnvCfg
+from robojudo.environment.env_cfgs import MujocoEnvCfg, UnitreeEnvCfg
 
 from .g1_env_cfg import G1EnvCfg
 from .g1_real_env_cfg import G1RealEnvCfg
@@ -40,3 +42,14 @@ class G1UfoM0RealEnvCfg(G1RealEnvCfg):
         37.0, 37.0, 37.0, 37.0, 22.0, 22.0, 22.0,
     ]
     target_slew_safety_factor: float = 0.5
+
+
+class G1UfoWorkstationEnvCfg(G1UfoM0RealEnvCfg):
+    env_type: str = "UnitreeG1DdsEnv"
+    unitree: UnitreeEnvCfg.UnitreeCfg = G1RealEnvCfg().unitree.model_copy(
+        update={"net_if": "", "enable_odometry": False})
+    odometry_type: Literal["NONE"] = "NONE"
+    dds_domain_id: int = Field(default=0, ge=0, le=232)
+    connect_timeout_s: float = Field(default=5.0, gt=0)
+    feedback_timeout_s: float = Field(default=0.1, gt=0)
+    command_timeout_s: float = Field(default=0.1, gt=0)

@@ -387,7 +387,7 @@ class VisionWorker:
             metrics_path: str | None, output_dir: str | None = None,
             camera_backend: str = "opencv", show_camera: bool = False,
             show_detection_box: bool = False, tcp_host: str | None = None,
-            tcp_port: int = 5541, healthcheck=None):
+            tcp_port: int = 5541, healthcheck=None, preview=None):
         if (video is None) == (camera is None):
             raise ValueError("Choose exactly one video or camera source")
         if camera is not None and output_dir:
@@ -404,7 +404,9 @@ class VisionWorker:
                 time.sleep(0.05)
         source = LatestFrameSource(raw_source)
         self.record_original = bool(output_dir and self.variant == "original")
-        preview = CameraPreview(show_detection_box=show_detection_box) if show_camera else None
+        owns_preview = preview is None
+        if show_camera and preview is None:
+            preview = CameraPreview(show_detection_box=show_detection_box)
 
         def on_frame(frame, detected_box):
             if healthcheck is not None:
@@ -464,7 +466,7 @@ class VisionWorker:
                 raise
         finally:
             source.close()
-            if preview is not None:
+            if preview is not None and owns_preview:
                 preview.close()
         if output_dir:
             target = Path(output_dir)

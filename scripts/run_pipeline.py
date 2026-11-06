@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 import time
+from collections import deque
 
 import numpy as np
 
@@ -34,6 +35,7 @@ def parse_args():
                         help="Jetson loopback TCP port for SSH-forwarded video z")
     parser.add_argument("--max-steps", type=int, default=None, help="Stop after this many control cycles")
     parser.add_argument("--metrics-json", help="Write video experiment metrics to this JSON path")
+    parser.add_argument("--net-if", help="Explicit workstation/robot DDS network interface")
     args = parser.parse_args()
     if args.record_video and args.show_reference:
         parser.error("--record-video is headless; use --video-content comparison for the reference")
@@ -52,6 +54,12 @@ def main():
     config_manager = ConfigManager(config_name=args.config)
 
     cfg = config_manager.get_cfg()
+    if args.net_if:
+        if not hasattr(cfg.env, "unitree"):
+            raise ValueError("--net-if requires a Unitree environment")
+        cfg.env.unitree.net_if = args.net_if
+    if cfg.env.env_type == "UnitreeG1DdsEnv" and not cfg.env.unitree.net_if:
+        raise ValueError("Workstation G1 control requires --net-if")
     for controller in cfg.ctrl:
         if controller.ctrl_type == "LatentCtrl":
             controller.variant = args.latent_variant
@@ -81,6 +89,9 @@ def main():
     logger.info(f"Using pipeline: {pipeline_type} -> {pipeline_class}")
 
     pipeline = pipeline_class(cfg=cfg)
+    cycle_times = deque(maxlen=4096)
+    started_at = time.monotonic()
+    cycle_count = 0
 
     try:
         if not cfg.env.is_sim:
@@ -90,10 +101,12 @@ def main():
             logger.warning("Sim mode — holding default pose, press R to start motion")
 
         while args.max_steps is None or pipeline.timestep < args.max_steps:
-            time_start = time.time()
+            time_start = time.monotonic()
             pipeline.step()
-            time_end = time.time()
+            time_end = time.monotonic()
             time_diff = time_end - time_start
+            cycle_times.append(time_diff)
+            cycle_count += 1
 
             # keep the pipeline running at the desired frequency
             if not cfg.run_fullspeed:
@@ -110,42 +123,55 @@ def main():
     except KeyboardInterrupt:
         logger.info("Interrupted; finalizing simulation outputs")
     finally:
-        if args.metrics_json and getattr(pipeline, "_video_mode", False):
-            metrics = list(pipeline.video_metrics)
-            ages = np.asarray([row["capture_to_pd_s"] for row in metrics
-                               if row["capture_to_pd_s"] is not None], dtype=np.float64)
-            produced = np.asarray([row["produce_to_pd_s"] for row in metrics
-                                   if row["produce_to_pd_s"] is not None], dtype=np.float64)
-            heights = np.asarray([row["base_height_m"] for row in metrics
-                                  if "base_height_m" in row], dtype=np.float64)
-            first_low = next((row["step"] for row in metrics
-                              if row.get("base_height_m", float("inf")) < 0.45), None)
-            first_fall = next((row["step"] for row in metrics
-                               if row.get("base_height_m", float("inf")) < 0.45
-                               and row.get("base_tilt_rad", 0.0) > 1.0), None)
-            report = {"config": args.config, "variant": args.latent_variant,
-                      "steps": pipeline.timestep, "policy_steps": len(metrics),
-                      "unique_latent_frames": len({row["latent_frame"] for row in metrics}),
-                      "low_height_step": first_low, "fall_step": first_fall,
-                      "min_base_height_m": float(heights.min()) if len(heights) else None,
-                      "capture_to_pd_p50_s": float(np.percentile(ages, 50)) if len(ages) else None,
-                      "capture_to_pd_p95_s": float(np.percentile(ages, 95)) if len(ages) else None,
-                      "produce_to_pd_p50_s": float(np.percentile(produced, 50)) if len(produced) else None,
-                      "produce_to_pd_p95_s": float(np.percentile(produced, 95)) if len(produced) else None,
-                      "samples": metrics}
-            from pathlib import Path
-            target = Path(args.metrics_json)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(report, indent=2) + "\n")
         try:
-            safe_stop = getattr(pipeline, "safe_stop", None)
-            if safe_stop is not None:
-                safe_stop()
+            if args.metrics_json and getattr(pipeline, "_video_mode", False):
+                metrics = list(pipeline.video_metrics)
+                ages = np.asarray([row["capture_to_pd_s"] for row in metrics
+                                   if row["capture_to_pd_s"] is not None], dtype=np.float64)
+                produced = np.asarray([row["produce_to_pd_s"] for row in metrics
+                                       if row["produce_to_pd_s"] is not None], dtype=np.float64)
+                heights = np.asarray([row["base_height_m"] for row in metrics
+                                      if "base_height_m" in row], dtype=np.float64)
+                first_low = next((row["step"] for row in metrics
+                                  if row.get("base_height_m", float("inf")) < 0.45), None)
+                first_fall = next((row["step"] for row in metrics
+                                   if row.get("base_height_m", float("inf")) < 0.45
+                                   and row.get("base_tilt_rad", 0.0) > 1.0), None)
+                report = {"config": args.config, "variant": args.latent_variant,
+                          "steps": pipeline.timestep, "policy_steps": len(metrics),
+                          "unique_latent_frames": len({row["latent_frame"] for row in metrics}),
+                          "low_height_step": first_low, "fall_step": first_fall,
+                          "min_base_height_m": float(heights.min()) if len(heights) else None,
+                          "capture_to_pd_p50_s": float(np.percentile(ages, 50)) if len(ages) else None,
+                          "capture_to_pd_p95_s": float(np.percentile(ages, 95)) if len(ages) else None,
+                          "produce_to_pd_p50_s": float(np.percentile(produced, 50)) if len(produced) else None,
+                          "produce_to_pd_p95_s": float(np.percentile(produced, 95)) if len(produced) else None,
+                          "samples": metrics}
+                if cfg.env.env_type == "UnitreeG1DdsEnv":
+                    report["dds"] = pipeline.env.metrics()
+                    report["real_state"] = pipeline.real_state
+                    report["fault_stopped"] = pipeline._fault_stop
+                    report["stop_reason"] = pipeline.stop_reason
+                    report["control_timing"] = {
+                        "configured_hz": pipeline.freq, "cycles": cycle_count,
+                        "elapsed_s": time.monotonic() - started_at,
+                        "compute_p95_s": float(np.percentile(cycle_times, 95)) if cycle_times else None,
+                        "compute_max_s": max(cycle_times) if cycle_times else None,
+                    }
+                from pathlib import Path
+                target = Path(args.metrics_json)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(json.dumps(report, indent=2) + "\n")
         finally:
             try:
-                pipeline.ctrl_manager.shutdown()
+                safe_stop = getattr(pipeline, "safe_stop", None)
+                if safe_stop is not None:
+                    safe_stop()
             finally:
-                pipeline.env.shutdown()
+                try:
+                    pipeline.ctrl_manager.shutdown()
+                finally:
+                    pipeline.env.shutdown()
 
 
 if __name__ == "__main__":

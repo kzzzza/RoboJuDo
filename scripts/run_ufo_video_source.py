@@ -33,6 +33,9 @@ def main():
     if not 1 <= args.tcp_port <= 65535:
         parser.error("--tcp-port must be between 1 and 65535")
     os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+    # FFmpeg callbacks into Python can deadlock native camera/decoder threads.
+    # Keep FFmpeg's native stderr logger in this mixed OpenCV/PyAV process.
+    os.environ.setdefault("PYAV_LOGGING", "off")
     runtime = Path(".local/video_runtime").resolve()
     runtime.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("YOLO_CONFIG_DIR", str(runtime))
@@ -41,7 +44,15 @@ def main():
     from vision_worker import VisionWorker
 
     tunnel = None
+    preview = None
     try:
+        if args.show_camera:
+            from vision_source import CameraPreview
+
+            # timm/torchvision can import PyAV, whose bundled FFmpeg conflicts
+            # with Qt's first window initialization on some Linux desktops.
+            # Create HighGUI before loading those model dependencies.
+            preview = CameraPreview(show_detection_box=args.show_detection_box)
         if args.ssh_target:
             tunnel = subprocess.Popen([
                 "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
@@ -62,9 +73,12 @@ def main():
                            metrics_path=args.metrics_json, output_dir=args.output_dir,
                            camera_backend=args.camera_backend, show_camera=args.show_camera,
                            show_detection_box=args.show_detection_box,
+                           preview=preview,
                            tcp_host="127.0.0.1" if tunnel is not None else None,
                            tcp_port=args.tcp_port, healthcheck=check_tunnel if tunnel is not None else None)
     finally:
+        if preview is not None:
+            preview.close()
         if tunnel is not None and tunnel.poll() is None:
             tunnel.terminate()
             try:
