@@ -205,6 +205,8 @@ class AMOPolicy(Policy):
             )
             raw_action = self.model(obs_tensor, extra_hist).cpu().numpy().squeeze()
 
+        if raw_action.shape != (self.num_actions,) or not np.isfinite(raw_action).all():
+            raise ValueError("Invalid AMO model action")
         raw_action = np.clip(raw_action, -40.0, 40.0)
         self.last_action = raw_action.copy()
 

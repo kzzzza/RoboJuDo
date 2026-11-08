@@ -92,6 +92,8 @@ def main():
     cycle_times = deque(maxlen=4096)
     started_at = time.monotonic()
     cycle_count = 0
+    full_compute_max = 0.0
+    overrun_count = 0
 
     try:
         if not cfg.env.is_sim:
@@ -107,6 +109,8 @@ def main():
             time_diff = time_end - time_start
             cycle_times.append(time_diff)
             cycle_count += 1
+            full_compute_max = max(full_compute_max, time_diff)
+            overrun_count += int(time_diff > pipeline.dt)
 
             # keep the pipeline running at the desired frequency
             if not cfg.run_fullspeed:
@@ -123,7 +127,12 @@ def main():
     except KeyboardInterrupt:
         logger.info("Interrupted; finalizing simulation outputs")
     finally:
+        stop_before_report = cfg.pipeline_type == "UfoAmoPipeline"
         try:
+            if stop_before_report:
+                # Finalize the dual-policy state and fresh-feedback hold before
+                # writing potentially slow metrics, and preserve the exit reason.
+                pipeline.safe_stop()
             if args.metrics_json and getattr(pipeline, "_video_mode", False):
                 metrics = list(pipeline.video_metrics)
                 ages = np.asarray([row["capture_to_pd_s"] for row in metrics
@@ -147,17 +156,22 @@ def main():
                           "produce_to_pd_p50_s": float(np.percentile(produced, 50)) if len(produced) else None,
                           "produce_to_pd_p95_s": float(np.percentile(produced, 95)) if len(produced) else None,
                           "samples": metrics}
+                if hasattr(pipeline, "metrics"):
+                    report["dual_policy"] = pipeline.metrics()
+                    report["policy_steps_total"] = pipeline.counts["video_policy_steps"]
                 if cfg.env.env_type == "UnitreeG1DdsEnv":
                     report["dds"] = pipeline.env.metrics()
                     report["real_state"] = pipeline.real_state
                     report["fault_stopped"] = pipeline._fault_stop
                     report["stop_reason"] = pipeline.stop_reason
-                    report["control_timing"] = {
-                        "configured_hz": pipeline.freq, "cycles": cycle_count,
-                        "elapsed_s": time.monotonic() - started_at,
-                        "compute_p95_s": float(np.percentile(cycle_times, 95)) if cycle_times else None,
-                        "compute_max_s": max(cycle_times) if cycle_times else None,
-                    }
+                report["control_timing"] = {
+                    "configured_hz": pipeline.freq, "cycles": cycle_count,
+                    "elapsed_s": time.monotonic() - started_at,
+                    "compute_p95_s": float(np.percentile(cycle_times, 95)) if cycle_times else None,
+                    "compute_p95_scope": "last 4096 cycles",
+                    "compute_max_s": full_compute_max if cycle_count else None,
+                    "overrun_count": overrun_count,
+                }
                 from pathlib import Path
                 target = Path(args.metrics_json)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -165,7 +179,7 @@ def main():
         finally:
             try:
                 safe_stop = getattr(pipeline, "safe_stop", None)
-                if safe_stop is not None:
+                if safe_stop is not None and not stop_before_report:
                     safe_stop()
             finally:
                 try:

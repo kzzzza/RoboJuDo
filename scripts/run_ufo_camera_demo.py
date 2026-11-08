@@ -31,6 +31,7 @@ def _last_lines(path: Path) -> str:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", choices=("original", "tcn", "mlp"), default="tcn")
+    parser.add_argument("--with-amo", action="store_true", help="Sim keys A/Y/B, space=R2; arrows=walk, J/L=turn")
     parser.add_argument("--camera", type=int, default=0, help="Azure Kinect device index")
     parser.add_argument("--camera-backend", choices=("k4a", "opencv"), default="k4a")
     parser.add_argument("--packages", default=".local/rgb_bfm")
@@ -57,7 +58,8 @@ def main():
     control_metrics = output / "control_metrics.json"
     vision_metrics = output / "vision_metrics.json"
     control_cmd = [str(root / args.control_python), str(root / "scripts/run_pipeline.py"),
-                   "-c", "g1_ufo_video_camera", "--latent-variant", args.variant,
+                   "-c", "g1_ufo_video_camera_amo" if args.with_amo else "g1_ufo_video_camera",
+                   "--latent-variant", args.variant,
                    "--latent-socket", str(socket_path), "--metrics-json", str(control_metrics)]
     if args.max_steps is not None:
         control_cmd += ["--max-steps", str(args.max_steps)]

@@ -24,6 +24,8 @@ class UfoM0Pipeline(RlPipeline):
     def __init__(self, cfg):
         self._real_mode = not cfg.env.is_sim
         self._video_mode = cfg.policy.latent_source == "controller"
+        if self._real_mode and not getattr(cfg, "do_safety_check", True):
+            logger.warning("UFO M0 Real fall check disabled; tilted/lying poses will not stop the policy")
         if self._real_mode and self._video_mode and not cfg.video_real_enabled:
             raise RuntimeError("Video Real is disabled until sim and latency qualification passes")
         if self._real_mode and os.environ.get("UFO_REAL_ROBOT_OK") != "1":

@@ -1,5 +1,7 @@
 # G1 工作站直连部署
 
+AMO 主动平衡／行走与 UFO 视频跟随之间的 A → Y → B 流程，见 [AMO/UFO 双策略部署](ufo_video_amo.md)，使用 `--with-amo` 启用。
+
 工作站运行摄像头、YOLO/HMR2/TCAM、TCN（或 Original/MLP）、UFO Actor 和控制状态机。工作站通过官方 DDS 订阅 G1 反馈、发送关节目标，机器人端无需安装自定义模型或进程。
 
 ```text
@@ -56,7 +58,7 @@ bash scripts/setup_unitree_workstation.sh .venv/bin/python
 
 ```bash
 .venv/bin/python scripts/check_ufo_m0_real.py \
-  --config g1_ufo_video_real_workstation --latent-variant tcn --net-if enp3s0
+  --config g1_ufo_video_real_workstation --latent-variant tcn --net-if enp8s0
 ```
 
 接收真实 G1 状态，确认递增 tick、CRC、29 关节、IMU 和遥控器数据格式：
@@ -64,7 +66,7 @@ bash scripts/setup_unitree_workstation.sh .venv/bin/python
 ```bash
 .venv/bin/python scripts/check_ufo_m0_real.py \
   --config g1_ufo_video_real_workstation --latent-variant tcn \
-  --net-if enp3s0 --read-only
+  --net-if enp8s0 --read-only
 ```
 
 只读检查不会创建 LowCmd 发布器，不释放内置运控，不发送动作，也不要求设置 `UFO_REAL_ROBOT_OK`。只读通信通过仍不等于底层动作和无线可靠性已经验收。
@@ -77,7 +79,7 @@ bash scripts/setup_unitree_workstation.sh .venv/bin/python
 
 ```bash
 UFO_REAL_ROBOT_OK=1 .venv/bin/python scripts/run_ufo_workstation_real.py \
-  --net-if enp3s0 --variant tcn --camera-backend opencv --camera 0 \
+  --net-if enp8s0 --variant tcn --camera-backend k4a --camera 0 \
   --show-detection-box
 ```
 
@@ -109,6 +111,8 @@ UFO_REAL_ROBOT_OK=1 .venv/bin/python scripts/run_pipeline.py \
 ```
 
 ## 5. 命令语义和故障行为
+
+工作站直连配置现将 `do_safety_check=False`，关闭 Pipeline 的倾倒/躯干倾角检查，允许有意的躺姿；启动日志会显示 `fall check disabled`。因此躯干倾角超过原阈值 1 rad（约 57.3°）也不会单独触发策略停止。这不代表现有模型已经通过躺姿动作稳定性验收。SDK 的 IMU/关节反馈有效性校验、CRC、100ms 反馈/目标超时、关节限幅和 R2 停止仍然有效，人物丢失处理也保留。修改配置后需重新启动进程才生效。
 
 Actor 原始输出不是可直接发送的关节角。沿用现有处理：`clip(raw * 5, -5, 5)` → 逐关节 UFO 缩放 → 叠加默认角 → 按关节名映射 → 位置与变化率保护 → `LowCmd.motor_cmd[].q`。增益保持原模型配置，`dq/tau` 为零，未使用的槽位保持禁用。
 

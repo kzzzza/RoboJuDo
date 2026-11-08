@@ -52,7 +52,8 @@ def check_host(net_if: str, driver="unitree_cpp"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", choices=("g1_ufo_m0_real", "g1_ufo_video_real_file",
-                                             "g1_ufo_video_real_stream", "g1_ufo_video_real_workstation"),
+                                             "g1_ufo_video_real_stream", "g1_ufo_video_real_workstation",
+                                             "g1_ufo_video_real_workstation_amo"),
                         default="g1_ufo_m0_real")
     parser.add_argument("--net-if", help="Explicit workstation DDS interface")
     parser.add_argument("--motion-path", help="Override the configured LAFAN G1 motion")
@@ -63,7 +64,7 @@ def main():
     args = parser.parse_args()
 
     cfg = ConfigManager(args.config).get_cfg()
-    workstation = args.config == "g1_ufo_video_real_workstation"
+    workstation = args.config.startswith("g1_ufo_video_real_workstation")
     if args.read_only and (args.offline or not workstation):
         parser.error("--read-only requires the workstation config without --offline")
     if args.net_if:
@@ -74,7 +75,7 @@ def main():
     if cfg.env.env_type != expected_env or cfg.env.dof.num_dofs != 29:
         raise ValueError("Unexpected UFO M0 Real environment configuration")
     model_dir = Path(cfg.policy.model_dir).expanduser()
-    video_stream = args.config in ("g1_ufo_video_real_stream", "g1_ufo_video_real_workstation")
+    video_stream = args.config == "g1_ufo_video_real_stream" or workstation
     actor_files = ("FBcprAuxModel.onnx", "FBcprAuxModel.meta.json")
     digests = check_artifacts(model_dir, MANIFEST, actor_files if video_stream else None)
     if video_stream:
@@ -143,6 +144,23 @@ def main():
     if action.shape != (1, 29) or not np.all(np.isfinite(action)):
         raise ValueError("Invalid actor output")
 
+    amo = None
+    if args.config.endswith("_amo"):
+        from box import Box
+        from robojudo.policy.amo_policy import AMOPolicy
+
+        directory = Path(cfg.amo_policy.policy_file).parent
+        amo_digests = check_artifacts(directory, directory / "artifact_manifest.json")
+        policy = AMOPolicy(cfg.amo_policy, "cpu")
+        sample = Box(dof_pos=np.asarray(cfg.amo_policy.obs_dof.default_pos, dtype=np.float32),
+                     dof_vel=np.zeros(23, dtype=np.float32), base_quat=np.array([0., 0., 0., 1.]),
+                     base_ang_vel=np.zeros(3, dtype=np.float32))
+        obs, _ = policy.get_observation(sample, {})
+        result = policy.get_action(obs)
+        if obs.shape != (1043,) or result.shape != (15,) or not np.isfinite(result).all():
+            raise ValueError("Unexpected AMO observation/action contract")
+        amo = {"sha256": amo_digests, "obs_dim": 1043, "action_dim": 15, "device": "cpu"}
+
     if not args.offline:
         check_host(cfg.env.unitree.net_if, "unitree_sdk2py" if workstation else "unitree_cpp")
         if video_stream and importlib.util.find_spec("unitree_sdk2py") is None:
@@ -166,6 +184,7 @@ def main():
         "network_interface": cfg.env.unitree.net_if,
         "host_checks": not args.offline,
         "feedback": feedback,
+        "amo": amo,
     }, indent=2))
 
 

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 from box import Box
 
+from robojudo.config.config_manager import ConfigManager
 from robojudo.controller.ctrl_cfgs import LatentCtrlCfg
 from robojudo.controller.latent_ctrl import LatentCtrl
 from robojudo.environment.utils.g1_motion_mode import _release_with_sdk
@@ -83,6 +84,53 @@ class TcpLatentTests(unittest.TestCase):
 
 
 class VideoRealStateTests(unittest.TestCase):
+    def _lying_tracking_pipeline(self, config_name="g1_ufo_video_real_workstation"):
+        pipeline = fake_pipeline()
+        pipeline.cfg = ConfigManager(config_name).get_cfg()
+        pipeline._video_mode = True
+        pipeline._dry_run_cycle = False
+        pipeline.real_state = "TRACKING"
+        pipeline._has_actuated = True
+        # Valid xyzw quaternion, pitch=90 degrees: a lying pose, not bad IMU data.
+        pipeline.env.base_quat = np.array([0.0, np.sqrt(0.5), 0.0, np.sqrt(0.5)])
+        latent = SimpleNamespace(cfg_ctrl=SimpleNamespace(source="socket"), ended=False,
+                                 set_playing=lambda _: None, reset=lambda: None)
+        pipeline.ctrl_manager.controllers = {"LatentCtrl": SimpleNamespace(inst=latent)}
+        return pipeline
+
+    def test_workstation_lying_pose_continues_but_jetson_fall_check_remains(self):
+        pipeline = self._lying_tracking_pipeline()
+        self.assertFalse(pipeline.cfg.do_safety_check)
+        self.assertFalse(self._cycle(pipeline))
+        pipeline.safety_check()
+        self.assertEqual(pipeline.real_state, "TRACKING")
+        self.assertFalse(pipeline._fault_stop)
+        self.assertEqual(pipeline.env.holds, 0)
+
+        old = self._lying_tracking_pipeline("g1_ufo_video_real_stream")
+        self.assertTrue(old.cfg.do_safety_check)
+        self.assertTrue(self._cycle(old))
+        self.assertEqual(old.real_state, "STOPPED")
+        self.assertTrue(old._fault_stop)
+
+    def test_workstation_lying_pose_still_obeys_r2_and_latent_expiry(self):
+        for controls, reason, fault in [({"R2": True}, "R2", False),
+                                        ({"valid": False}, "video latent source stale or invalid", True)]:
+            with self.subTest(reason=reason):
+                pipeline = self._lying_tracking_pipeline()
+                self.assertTrue(self._cycle(pipeline, **controls))
+                self.assertEqual(pipeline.real_state, "STOPPED")
+                self.assertEqual(pipeline.stop_reason, reason)
+                self.assertEqual(pipeline._fault_stop, fault)
+                self.assertGreater(pipeline.env.holds, 0)
+
+    def test_workstation_disabled_fall_check_still_rejects_nonfinite_feedback(self):
+        pipeline = self._lying_tracking_pipeline()
+        pipeline.env.base_quat[0] = np.nan
+        with self.assertRaisesRegex(ValueError, "Invalid real robot feedback: base_quat"):
+            self._cycle(pipeline)
+        self.assertEqual(pipeline.env.targets, [])
+
     def _cycle(self, pipeline, *, valid=True, person_lost=False, **buttons):
         state = {name: bool(buttons.get(name, False)) for name in pipeline.BUTTONS}
         ctrl_data = Box({"UnitreeCtrl": {"buttons": state},

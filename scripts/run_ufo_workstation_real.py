@@ -49,6 +49,7 @@ def checked(command, log, environment):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--net-if", required=True, help="Workstation Ethernet/Wi-Fi interface, not Jetson's eth0")
+    parser.add_argument("--with-amo", action="store_true", help="A: pose, Y: AMO walking/balance, B: UFO")
     parser.add_argument("--variant", choices=("tcn", "mlp", "original"), default="tcn")
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--camera-backend", choices=("opencv", "k4a"), default="opencv")
@@ -60,6 +61,7 @@ def main():
     parser.add_argument("--no-preview", action="store_true")
     parser.add_argument("--show-detection-box", action="store_true")
     args = parser.parse_args()
+    config = CONFIG + "_amo" if args.with_amo else CONFIG
     if os.environ.get("UFO_REAL_ROBOT_OK") != "1":
         parser.error("Real control requires UFO_REAL_ROBOT_OK=1; use check_ufo_m0_real.py for read-only checks")
     if args.no_preview and args.show_detection_box:
@@ -90,7 +92,7 @@ def main():
     control_log = output / "control.log"
     vision_log = output / "vision.log"
     control = vision = None
-    report = {"config": CONFIG, "variant": args.variant, "net_if": args.net_if,
+    report = {"config": config, "variant": args.variant, "net_if": args.net_if,
               "status": "starting", "robot_models_deployed": False}
     try:
         # Verify all required files/dependencies before releasing built-in motion control.
@@ -100,12 +102,12 @@ def main():
         checked([vision_python, "-c", "import torch, torchvision, cv2, timm, av, ultralytics, lap; "
                  + ("assert torch.cuda.is_available(), 'CUDA unavailable'" if args.device.startswith("cuda") else "")],
                 preflight_log, environment)
-        checked([control_python, str(ROOT / "scripts/check_ufo_m0_real.py"), "--config", CONFIG,
+        checked([control_python, str(ROOT / "scripts/check_ufo_m0_real.py"), "--config", config,
                  "--net-if", args.net_if, "--latent-variant", args.variant, "--read-only"],
                 preflight_log, environment)
         with control_log.open("w") as control_file, vision_log.open("w") as vision_file:
             control = subprocess.Popen([
-                control_python, str(ROOT / "scripts/run_pipeline.py"), "-c", CONFIG,
+                control_python, str(ROOT / "scripts/run_pipeline.py"), "-c", config,
                 "--net-if", args.net_if, "--latent-variant", args.variant,
                 "--latent-socket", str(socket_path), "--metrics-json", str(output / "control_metrics.json")],
                 cwd=ROOT, env=environment, stdout=control_file, stderr=subprocess.STDOUT, start_new_session=True)
@@ -126,13 +128,25 @@ def main():
                 command.append("--show-detection-box")
             vision = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=vision_file,
                                       stderr=subprocess.STDOUT, start_new_session=True)
-            print(f"Workstation {args.variant} -> G1 DDS on {args.net_if}; A: stand, B: track, R2: stop", flush=True)
+            print(f"Workstation {args.variant} -> G1 DDS on {args.net_if}; A: pose, "
+                  + ("Y: AMO, " if args.with_amo else "") + "B: track, R2: stop", flush=True)
             print(f"Logs: {output}", flush=True)
             report["status"] = "running"
-            while control.poll() is None and vision.poll() is None:
+            vision_failed = False
+            while control.poll() is None:
+                vision_code = vision.poll()
+                if vision_code is not None:
+                    if not args.with_amo or vision_code == 0:
+                        break
+                    if not vision_failed:
+                        vision_failed = True
+                        report.update(vision_failed=True, vision_failure_exit=vision_code)
+                        print(f"Vision failed ({vision_code}); keeping AMO control alive. "
+                              "UFO returns to AMO at the 5s visual-age limit. Ctrl+C exits.\n"
+                              + vision_log.read_text(errors="replace")[-2000:], flush=True)
                 time.sleep(0.1)
             for name, process, log in (("control", control, control_log), ("vision", vision, vision_log)):
-                if process.poll() not in (None, 0):
+                if process.poll() not in (None, 0) and not (name == "vision" and vision_failed):
                     raise RuntimeError(f"{name} exited ({process.returncode}):\n{log.read_text(errors='replace')[-4000:]}")
             report["status"] = "stopped"
     except KeyboardInterrupt:

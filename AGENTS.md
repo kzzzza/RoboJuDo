@@ -57,3 +57,9 @@
 - 桌面摄像头演示使用 `scripts/run_ufo_camera_demo.py --variant tcn`，同时打开 RGB 与 MuJoCo 窗口；Azure Kinect 经 `robojudo/video/azure_kinect.py` 的 libk4a 读取。`g1_ufo_video_camera` 与真机配置使用相同的 5 秒数据年龄限制，但桌面效果不能据此判断真机延迟合格。
 - 真机摄像头链路由 GPU 主机通过 SSH 转发 `z` 到 Jetson 本机 TCP 端口；`LatentCtrl` 后台接收并校准跨主机单调时钟，控制循环继续复用 UFO Actor 和已测试的 `UnitreeCppEnv`。`g1_ufo_video_real_stream` 启动前自动用官方 SDK 释放自带运动服务；A 站姿、B 跟随、R2 软件停止并保持，操作见 `docs/ufo_video_real.md`。
 - 实时摄像头检测不到人时，视觉进程用潜变量协议的 `person_lost` 状态立即清除旧 `z` 与时序缓存。Sim 和 Real 跟随状态都用约 5 秒回默认站姿；Sim 在新有效 `z` 到达后自动恢复，Real 保持站姿并要求重新按 B。通信超时仍按故障处理，不视作正常人物离开。
+
+## UFO／AMO 工作站双策略
+
+- `UfoAmoPipeline` 对应 `g1_ufo_video_real_workstation_amo` 和 `g1_ufo_video_camera_amo`；统一入口通过 `--with-amo` 选择，旧 UFO-only 与 Jetson 流程不变。AMO 使用本地 `assets/models/g1/amo/` 的三个现有文件，哈希由同目录 manifest 固定；CPU TorchScript 输入 1043 维、输出 15 个腿／腰关节，手臂及手腕按名称补齐默认角和对应增益。
+- 操作：A 用 3 秒过渡到 AMO 默认姿态，Y 用 0.5 秒进入主动平衡／行走，B 先 0.5 秒减速再 0.5 秒进入 UFO；Y/X 或视觉丢失／过期回 AMO。R2 当前周期停止策略并尝试新鲜反馈下的位置保持；正常停止需重新 A→Y→B，硬件／模型故障不能按键复位。A 与等待 Y 时需要外部支撑；仿真提供明确的根部支撑夹具，AMO 接管后释放。
+- AMO 新流程清理完整历史并过滤内部 Y 事件，切换同时平滑目标和 PD 增益，只有一个 DDS 发布器。此配置启用姿态检查；原 UFO-only 配置允许躺姿的改动保留。详见 `docs/ufo_video_amo.md`。隔离 DDS 验证固定 domain 121／lo／禁用组播；不能将通信模拟或 MuJoCo 通过描述为真机站稳验收。
