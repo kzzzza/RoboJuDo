@@ -53,8 +53,13 @@ def main():
     parser.add_argument("--variant", choices=("tcn", "mlp", "original"), default="tcn")
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--camera-backend", choices=("opencv", "k4a"), default="opencv")
+    parser.add_argument("--camera-rotate", type=int, choices=(0, 90, 180, 270), default=0)
     parser.add_argument("--packages", default=".local/rgb_bfm")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--vision-profile", choices=("auto", "legacy", "low-latency"), default="auto")
+    parser.add_argument("--hmr-backend", choices=("auto", "torch", "tensorrt"), default="auto")
+    parser.add_argument("--detector-backend", choices=("auto", "torch", "tensorrt"), default="auto")
+    parser.add_argument("--accel-dir", default=".local/vision_accel")
     parser.add_argument("--control-python", default=".venv/bin/python")
     parser.add_argument("--vision-python", default=".venv-video/bin/python")
     parser.add_argument("--output", default=".local/workstation_runs")
@@ -83,6 +88,8 @@ def main():
                         "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
                         "XDG_CACHE_HOME": str(ROOT / ".local/cache"),
                         "TORCH_HOME": str(ROOT / ".local/cache/torch"),
+                        "CUDA_CACHE_PATH": str(ROOT / ".local/cache/cuda"),
+                        "TMPDIR": str(ROOT / ".local/setup"),
                         "HF_HOME": str(ROOT / ".local/cache/huggingface"),
                         "YOLO_CONFIG_DIR": str(ROOT / ".local/video_runtime"),
                         "MPLCONFIGDIR": str(ROOT / ".local/video_runtime"),
@@ -102,6 +109,11 @@ def main():
         checked([vision_python, "-c", "import torch, torchvision, cv2, timm, av, ultralytics, lap; "
                  + ("assert torch.cuda.is_available(), 'CUDA unavailable'" if args.device.startswith("cuda") else "")],
                 preflight_log, environment)
+        checked([vision_python, str(ROOT / "scripts/run_ufo_video_source.py"),
+                 "--camera", str(args.camera), "--variant", args.variant, "--packages", str(packages),
+                 "--device", args.device, "--vision-profile", args.vision_profile,
+                 "--hmr-backend", args.hmr_backend, "--detector-backend", args.detector_backend,
+                 "--accel-dir", str(ROOT / args.accel_dir), "--check-runtime"], preflight_log, environment)
         checked([control_python, str(ROOT / "scripts/check_ufo_m0_real.py"), "--config", config,
                  "--net-if", args.net_if, "--latent-variant", args.variant, "--read-only"],
                 preflight_log, environment)
@@ -122,6 +134,10 @@ def main():
                        "--camera", str(args.camera), "--camera-backend", args.camera_backend,
                        "--variant", args.variant, "--packages", str(packages), "--device", args.device,
                        "--socket", str(socket_path), "--metrics-json", str(output / "vision_metrics.json")]
+            command += ["--camera-rotate", str(args.camera_rotate),
+                        "--vision-profile", args.vision_profile, "--hmr-backend", args.hmr_backend,
+                        "--detector-backend", args.detector_backend,
+                        "--accel-dir", str(ROOT / args.accel_dir)]
             if not args.no_preview:
                 command.append("--show-camera")
             if args.show_detection_box:

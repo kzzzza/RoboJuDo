@@ -40,7 +40,7 @@ class Sample:
     source_frame_id: int
     sample_time: float
     captured_at: float
-    feature: np.ndarray
+    feature: object  # NumPy in the legacy path, GPU tensor in the accelerated path
 
 
 class VisionWorker:
@@ -60,13 +60,11 @@ class VisionWorker:
         self.packages = Path(packages).expanduser().resolve()
         self.bundle = _load_bundle(self.packages / "original_pipeline")
         import torch
-        from ultralytics import YOLO
-
         torch.set_num_threads(1)
         self.torch = torch
-        self.detector = YOLO(str(self.bundle.ROOT / "models/yolov8x.pt"))
-        self.visual = self.bundle.load_visual(device)
-        self.frontend = self.bundle.load_frontend(device)
+        self.detector = self._load_detector()
+        self.visual = self._load_visual()
+        self.frontend = self._load_frontend()
         if variant == "original":
             from lib.robot.robot_spec import load_robot_spec
             from lib.util.robot_rotation import rot6d_to_quat_wxyz
@@ -103,6 +101,7 @@ class VisionWorker:
         self.tcam_seconds = deque(maxlen=4096)
         self.backend_seconds = deque(maxlen=4096)
         self.capture_to_send = deque(maxlen=4096)
+        self.send_intervals = deque(maxlen=4096)
         self.frame_count = 0
         self.first_capture_time = None
         self.first_send_time = None
@@ -119,6 +118,23 @@ class VisionWorker:
         self.sent_times = []
         self.record_original = False
         self.original_s = {name: [] for name in ("root_trans", "root_rot_quat", "dof")}
+
+    def _load_visual(self):
+        return self.bundle.load_visual(self.device)
+
+    def _load_detector(self):
+        from ultralytics import YOLO
+
+        return YOLO(str(self.bundle.ROOT / "models/yolov8x.pt"))
+
+    def _load_frontend(self):
+        return self.bundle.load_frontend(self.device)
+
+    def _finish_metrics(self):
+        pass
+
+    def _extra_metrics(self):
+        return {"vision_profile": "legacy"}
 
     def reset_stream(self):
         self.session_id = secrets.randbits(64)
@@ -387,14 +403,15 @@ class VisionWorker:
             metrics_path: str | None, output_dir: str | None = None,
             camera_backend: str = "opencv", show_camera: bool = False,
             show_detection_box: bool = False, tcp_host: str | None = None,
-            tcp_port: int = 5541, healthcheck=None, preview=None):
+            tcp_port: int = 5541, healthcheck=None, preview=None, live_replay=False, camera_rotation=0):
         if (video is None) == (camera is None):
             raise ValueError("Choose exactly one video or camera source")
         if camera is not None and output_dir:
             raise ValueError("--output-dir records finite videos only; live camera memory must stay bounded")
         if show_detection_box and (video is not None or not show_camera):
             raise ValueError("Detection boxes require a camera preview")
-        raw_source = replay_video(video) if video is not None else camera_frames(camera, backend=camera_backend)
+        raw_source = replay_video(video) if video is not None else camera_frames(
+            camera, backend=camera_backend, rotation=camera_rotation)
         endpoint = Path(socket_path)
         if tcp_host is None:
             deadline = time.monotonic() + 30.0
@@ -422,7 +439,7 @@ class VisionWorker:
                 else:
                     network_sender = LatestTcpSender(tcp_host, tcp_port)
                     stack.callback(network_sender.close)
-                for batch in self.process(source, finalize=video is not None,
+                for batch in self.process(source, finalize=video is not None and not live_replay,
                                           on_frame=on_frame if preview is not None or healthcheck is not None else None):
                     for sample, z, _ in batch:
                         if z is not None:
@@ -453,10 +470,12 @@ class VisionWorker:
                             network_sender.send(packet)
                         self.packets_sent += 1
                         sent_at = time.monotonic()
-                        if not person_lost:
+                        if not person_lost and any(value is not None for _, value, _ in batch):
                             self.latent_packets_sent += 1
                             if self.first_send_time is None:
                                 self.first_send_time = sent_at
+                            if self.last_send_time is not None:
+                                self.send_intervals.append(sent_at - self.last_send_time)
                             self.last_send_time = sent_at
                             self.capture_to_send.append(sent_at - sample.captured_at)
                     except OSError:
@@ -479,6 +498,7 @@ class VisionWorker:
                     name: np.asarray(rows, dtype=np.float32)
                     for name, rows in self.original_s.items()})
         if metrics_path:
+            self._finish_metrics()
             def percentile(values, p):
                 return float(np.percentile(values, p)) if values else None
 
@@ -506,5 +526,8 @@ class VisionWorker:
                     "window_inference_p95_s": percentile(self.tcam_seconds, 95),
                     "capture_to_send_p50_s": percentile(self.capture_to_send, 50),
                     "capture_to_send_p95_s": percentile(self.capture_to_send, 95)}
+            data["update_interval_p50_s"] = percentile(self.send_intervals, 50)
+            data["update_interval_p95_s"] = percentile(self.send_intervals, 95)
+            data.update(self._extra_metrics())
             Path(metrics_path).write_text(json.dumps(data, indent=2) + "\n")
         return self.result_count

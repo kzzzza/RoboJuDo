@@ -132,6 +132,7 @@ class WorkstationCliTests(unittest.TestCase):
         self.assertEqual(commands[0][commands[0].index("--latent-socket") + 1],
                          commands[1][commands[1].index("--socket") + 1])
         self.assertEqual(commands[1][commands[1].index("--variant") + 1], "tcn")
+        self.assertEqual(commands[1][commands[1].index("--vision-profile") + 1], "auto")
         self.assertTrue(all("--ssh-target" not in command for command in commands))
 
     def test_preflight_failure_does_not_start_control(self):

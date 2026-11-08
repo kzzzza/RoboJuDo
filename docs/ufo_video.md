@@ -52,6 +52,8 @@ done
 
 Azure Kinect 的运行库安装与 USB 权限配置见 [Azure Kinect 本机安装与测试](azure_kinect_setup.md)。
 
+CUDA 摄像头的 TCN／MLP 默认使用逐帧输出和 GPU 缓存的低延迟路径。TensorRT 安装、缓存构建、后端切换、相机旋转及同片段延迟复测见 [实时视觉低延迟部署](ufo_vision_latency.md)。文件回放默认保持原算法。
+
 接好 Azure Kinect DK 后，站在镜头前并保持全身入画。在桌面终端运行：
 
 ```bash

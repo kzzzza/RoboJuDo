@@ -34,8 +34,13 @@ def main():
     parser.add_argument("--with-amo", action="store_true", help="Sim keys A/Y/B, space=R2; arrows=walk, J/L=turn")
     parser.add_argument("--camera", type=int, default=0, help="Azure Kinect device index")
     parser.add_argument("--camera-backend", choices=("k4a", "opencv"), default="k4a")
+    parser.add_argument("--camera-rotate", type=int, choices=(0, 90, 180, 270), default=0)
     parser.add_argument("--packages", default=".local/rgb_bfm")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--vision-profile", choices=("auto", "legacy", "low-latency"), default="auto")
+    parser.add_argument("--hmr-backend", choices=("auto", "torch", "tensorrt"), default="auto")
+    parser.add_argument("--detector-backend", choices=("auto", "torch", "tensorrt"), default="auto")
+    parser.add_argument("--accel-dir", default=".local/vision_accel")
     parser.add_argument("--control-python", default=".venv/bin/python")
     parser.add_argument("--vision-python", default=".venv-video/bin/python")
     parser.add_argument("--output", default=".local/camera_demo")
@@ -65,8 +70,12 @@ def main():
         control_cmd += ["--max-steps", str(args.max_steps)]
     vision_cmd = [str(root / args.vision_python), str(root / "scripts/run_ufo_video_source.py"),
                   "--camera", str(args.camera), "--camera-backend", args.camera_backend,
+                  "--camera-rotate", str(args.camera_rotate),
                   "--variant", args.variant, "--packages", str((root / args.packages).resolve()),
                   "--device", args.device, "--socket", str(socket_path),
+                  "--vision-profile", args.vision_profile, "--hmr-backend", args.hmr_backend,
+                  "--detector-backend", args.detector_backend,
+                  "--accel-dir", str(root / args.accel_dir),
                   "--metrics-json", str(vision_metrics)]
     if not args.no_preview:
         vision_cmd.append("--show-camera")

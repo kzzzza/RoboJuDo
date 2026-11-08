@@ -14,12 +14,21 @@ def main():
     source.add_argument("--video", help="MP4 replayed using presentation timestamps and sampled to 30 Hz")
     source.add_argument("--camera", type=int, help="Camera index")
     parser.add_argument("--camera-backend", choices=("opencv", "k4a"), default="opencv")
+    parser.add_argument("--camera-rotate", type=int, choices=(0, 90, 180, 270), default=0,
+                        help="Rotate raw camera input clockwise before detection")
     parser.add_argument("--show-camera", action="store_true", help="Open an RGB preview; q/Esc closes it")
     parser.add_argument("--show-detection-box", action="store_true",
                         help="Draw the selected person detector box in the RGB preview")
     parser.add_argument("--variant", choices=("original", "tcn", "mlp"), required=True)
     parser.add_argument("--packages", default=".local/rgb_bfm")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--vision-profile", choices=("auto", "legacy", "low-latency"), default="auto",
+                        help="auto: low-latency for CUDA tcn/mlp cameras; legacy for files/Original/CPU")
+    parser.add_argument("--hmr-backend", choices=("auto", "torch", "tensorrt"), default="auto")
+    parser.add_argument("--detector-backend", choices=("auto", "torch", "tensorrt"), default="auto")
+    parser.add_argument("--accel-dir", default=".local/vision_accel")
+    parser.add_argument("--check-runtime", action="store_true",
+                        help="Load/check the selected models and backend, then exit without camera/socket access")
     parser.add_argument("--socket", default="/tmp/robojudo_ufo_latent.sock")
     parser.add_argument("--ssh-target", help="Jetson SSH destination, e.g. user@robot; forward z over SSH")
     parser.add_argument("--tcp-port", type=int, default=5541, help="Loopback port on both SSH endpoints")
@@ -40,6 +49,12 @@ def main():
     runtime.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("YOLO_CONFIG_DIR", str(runtime))
     os.environ.setdefault("MPLCONFIGDIR", str(runtime))
+    for variable, relative in (("XDG_CACHE_HOME", ".local/cache"), ("TORCH_HOME", ".local/cache/torch"),
+                               ("HF_HOME", ".local/cache/huggingface"), ("CUDA_CACHE_PATH", ".local/cache/cuda"),
+                               ("TMPDIR", ".local/setup")):
+        directory = Path(relative).resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault(variable, str(directory))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "robojudo/video"))
     from vision_worker import VisionWorker
 
@@ -68,10 +83,24 @@ def main():
             if tunnel is not None and tunnel.poll() is not None:
                 raise RuntimeError(f"SSH tunnel exited with status {tunnel.returncode}")
 
-        worker = VisionWorker(Path(args.packages), args.variant, args.device)
+        fast = args.vision_profile == "low-latency" or (
+            args.vision_profile == "auto" and args.camera is not None
+            and args.variant in ("tcn", "mlp") and args.device.startswith("cuda"))
+        if fast:
+            from vision_fast import FastVisionWorker
+
+            worker = FastVisionWorker(Path(args.packages), args.variant, args.device,
+                                      cache_dir=args.accel_dir, hmr_backend=args.hmr_backend,
+                                      detector_backend=args.detector_backend)
+        else:
+            worker = VisionWorker(Path(args.packages), args.variant, args.device)
+        if args.check_runtime:
+            print(f"Vision runtime ready: {args.variant}, {args.vision_profile}", flush=True)
+            return
         count = worker.run(video=args.video, camera=args.camera, socket_path=args.socket,
                            metrics_path=args.metrics_json, output_dir=args.output_dir,
                            camera_backend=args.camera_backend, show_camera=args.show_camera,
+                           camera_rotation=args.camera_rotate,
                            show_detection_box=args.show_detection_box,
                            preview=preview,
                            tcp_host="127.0.0.1" if tunnel is not None else None,

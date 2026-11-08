@@ -97,9 +97,12 @@ def replay_video(path: str | Path):
             yield Frame(index, decoded.to_ndarray(format="rgb24"), due, pts)
 
 
-def camera_frames(device: int = 0, *, backend: str = "opencv"):
+def camera_frames(device: int = 0, *, backend: str = "opencv", rotation: int = 0):
     """Read RGB frames from V4L2/OpenCV or Azure Kinect."""
     import cv2
+
+    if rotation not in (0, 90, 180, 270):
+        raise ValueError("Camera rotation must be 0/90/180/270 degrees clockwise")
 
     if backend == "k4a":
         try:
@@ -133,6 +136,9 @@ def camera_frames(device: int = 0, *, backend: str = "opencv"):
         first_time = None
         while True:
             rgb, captured_at = read()
+            if rotation:
+                rgb = cv2.rotate(rgb, {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                                      270: cv2.ROTATE_90_COUNTERCLOCKWISE}[rotation])
             if first_time is None:
                 first_time = captured_at
             yield Frame(index, rgb, captured_at, captured_at - first_time)

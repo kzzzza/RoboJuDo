@@ -58,6 +58,11 @@
 - 真机摄像头链路由 GPU 主机通过 SSH 转发 `z` 到 Jetson 本机 TCP 端口；`LatentCtrl` 后台接收并校准跨主机单调时钟，控制循环继续复用 UFO Actor 和已测试的 `UnitreeCppEnv`。`g1_ufo_video_real_stream` 启动前自动用官方 SDK 释放自带运动服务；A 站姿、B 跟随、R2 软件停止并保持，操作见 `docs/ufo_video_real.md`。
 - 实时摄像头检测不到人时，视觉进程用潜变量协议的 `person_lost` 状态立即清除旧 `z` 与时序缓存。Sim 和 Real 跟随状态都用约 5 秒回默认站姿；Sim 在新有效 `z` 到达后自动恢复，Real 保持站姿并要求重新按 B。通信超时仍按故障处理，不视作正常人物离开。
 
+## UFO 视觉运行加速
+
+- 摄像头 CUDA TCN／MLP 的 `--vision-profile auto` 默认使用 `FastVisionWorker`：同一套模型权重的 FP16 推理、GPU 特征／历史缓存、每张处理完的图像输出最新 z。上下文均值仍每 4 个逻辑样本更新，只使用过去槽。`legacy`、默认文件回放、Original 和 CPU 保留原算法；完整离线模型不变。
+- `scripts/prepare_ufo_vision_accel.py` 从本地权重构建、校验 HMR2／YOLOv8x TensorRT 和 TCAM TorchScript 缓存；缓存、依赖、数值验证及延迟复测方法见 `docs/ufo_vision_latency.md`。检测每帧执行，空检测不能复用旧框；z 的 50Hz 控制读取频率与实际视觉更新率分别统计。`--camera-rotate` 显式修正原始相机方向，默认不旋转。
+
 ## UFO／AMO 工作站双策略
 
 - `UfoAmoPipeline` 对应 `g1_ufo_video_real_workstation_amo` 和 `g1_ufo_video_camera_amo`；统一入口通过 `--with-amo` 选择，旧 UFO-only 与 Jetson 流程不变。AMO 使用本地 `assets/models/g1/amo/` 的三个现有文件，哈希由同目录 manifest 固定；CPU TorchScript 输入 1043 维、输出 15 个腿／腰关节，手臂及手腕按名称补齐默认角和对应增益。
