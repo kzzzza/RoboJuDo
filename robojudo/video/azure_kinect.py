@@ -3,6 +3,7 @@
 import ctypes
 import time
 from ctypes import POINTER, byref, c_bool, c_int, c_int32, c_uint32, c_uint8, c_void_p
+from pathlib import Path
 
 import numpy as np
 
@@ -26,7 +27,14 @@ class AzureKinectRGB:
 
     def __init__(self, device_index: int = 0):
         self.device_index = device_index
-        self.sdk = ctypes.CDLL("libk4a.so")
+        try:
+            self.sdk = ctypes.CDLL("libk4a.so")
+        except OSError:
+            local_sdk = (Path(__file__).resolve().parents[2] / ".local/k4a/runtime/usr/lib"
+                         / "x86_64-linux-gnu/libk4a.so")
+            if not local_sdk.is_file():
+                raise RuntimeError("libk4a is unavailable; run bash scripts/setup_azure_kinect.sh") from None
+            self.sdk = ctypes.CDLL(str(local_sdk))
         sdk = self.sdk
         sdk.k4a_device_get_installed_count.restype = c_uint32
         sdk.k4a_device_open.argtypes = [c_uint32, POINTER(c_void_p)]

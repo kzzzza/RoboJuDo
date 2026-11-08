@@ -50,6 +50,8 @@ done
 
 ## 摄像头双窗口演示
 
+Azure Kinect 的运行库安装与 USB 权限配置见 [Azure Kinect 本机安装与测试](azure_kinect_setup.md)。
+
 接好 Azure Kinect DK 后，站在镜头前并保持全身入画。在桌面终端运行：
 
 ```bash
